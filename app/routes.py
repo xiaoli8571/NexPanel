@@ -176,7 +176,7 @@ def _uninstall_cmd(base: str) -> str:
 def list_nodes(request: Request, user: dict = Depends(current_user)):
     base = _panel_base(request)
     out = []
-    for r in db.q("SELECT * FROM nodes ORDER BY id"):
+    for r in db.q("SELECT * FROM nodes ORDER BY sort_order, id"):
         d = _node_out(r)
         if r["kind"] == "agent":
             d["install_cmd"] = _install_cmd(base, r["agent_token"])
@@ -235,6 +235,9 @@ def create_node(body: NodeIn, request: Request, admin: dict = Depends(require_ad
         db.audit(admin["sub"], "添加节点", body.name.strip(),
                  f"{body.kind} {body.role}".strip(), request.client.host)
         return out
+    # SSH 节点创建后立即启动后台监控（否则要等面板重启才有负载数据）
+    if row["kind"] == "ssh":
+        monitor.start_node(row)
     db.audit(admin["sub"], "添加节点", body.name.strip(),
              f"{body.kind} {body.host}:{body.port}".strip(), request.client.host)
     return _node_out(row)
@@ -333,6 +336,20 @@ def delete_node(nid: int, request: Request, force: int = 0,
     monitor.stop_node(nid)
     db.ex("DELETE FROM nodes WHERE id=?", (nid,))
     db.audit(admin["sub"], "删除节点", node["name"], "", request.client.host)
+    return {"ok": True}
+
+
+class ReorderIn(BaseModel):
+    ids: list[int]
+
+
+@router.post("/nodes/reorder")
+def reorder_nodes(body: ReorderIn, request: Request,
+                  admin: dict = Depends(require_admin)):
+    """按传入顺序更新节点 sort_order"""
+    for i, nid in enumerate(body.ids):
+        db.ex("UPDATE nodes SET sort_order=? WHERE id=?", (i, nid))
+    db.audit(admin["sub"], "调整节点排序", "system", "", request.client.host)
     return {"ok": True}
 
 
@@ -493,6 +510,44 @@ async def del_single_node(app_id: int, index: int, request: Request,
             app_id, index, admin["sub"], request.client.host)
     except ValueError as e:
         raise HTTPException(404, str(e))
+
+
+class SyncMachineIn(BaseModel):
+    node_id: int | None = None
+    container_id: int | None = None
+
+
+@router.post("/apps/sync-machine")
+async def sync_machine(body: SyncMachineIn, request: Request,
+                       admin: dict = Depends(require_admin)):
+    """按机器合并重建 sing-box 配置（用于修复多应用互相覆盖/协议不通）"""
+    from . import deploy as deploy_mod
+    if not body.node_id and not body.container_id:
+        raise HTTPException(400, "请指定 node_id 或 container_id")
+    node = None
+    container = None
+    if body.node_id:
+        node = db.one("SELECT * FROM nodes WHERE id=?", (body.node_id,))
+        if not node:
+            raise HTTPException(404, "节点不存在")
+    if body.container_id:
+        container = db.one("SELECT * FROM containers WHERE id=?", (body.container_id,))
+        if not container:
+            raise HTTPException(404, "容器不存在")
+        if not node:
+            node = db.one("SELECT * FROM nodes WHERE id=?", (container["node_id"],))
+    if not node:
+        raise HTTPException(404, "节点不存在")
+    try:
+        ok = await deploy_mod._sync_machine_singbox(
+            body.container_id, body.node_id or (container["node_id"] if container else 0),
+            dict(node), dict(container) if container else None,
+            {"id":"sync","log":[],"status":"","result":None})
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    db.audit(admin["sub"], "同步节点配置",
+             (container or node)["name"], "", request.client.host)
+    return {"ok": True, "synced": ok}
 
 
 @router.post("/deploy")

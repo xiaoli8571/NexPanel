@@ -397,7 +397,7 @@ async function viewNodes(){
   const render = async ()=>{
     try{
       const list = await api("/nodes");
-      $("#node-grid").innerHTML = list.map(n=>{
+      $("#node-grid").innerHTML = list.map((n,i)=>{
         const isProbe = n.role==="probe";
         const [c,lbl] = NODE_ST[n.status]||NODE_ST.unknown;
         const L=n.live, memP=L.mem_total_mb?L.mem_used_mb/L.mem_total_mb*100:0,
@@ -428,6 +428,8 @@ async function viewNodes(){
             ${n.kind==="agent"&&!n.lxc_ok&&n.status==="online"?`<button class="btn sm primary" data-install="${n.id}">⚡ 安装 LXC</button>`:""}`:""}
           </div>
           <div class="actions-cell" style="margin-top:12px">
+            <button class="btn sm" data-move="${i}" data-dir="-1" title="上移">↑</button>
+            <button class="btn sm" data-move="${i}" data-dir="1" title="下移">↓</button>
             <button class="btn sm" data-probe="${n.id}">${icon("activity",12)} 测试</button>
             ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 接入</button>`:""}
             ${(n.kind==="ssh"||n.kind==="agent")&&n.status==="online"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
@@ -446,6 +448,16 @@ async function viewNodes(){
           toast(`✓ ${r.hostname||""} · ${r.os} · LXC ${r.lxc_installed?("已安装 "+(r.lxc_version||"")):"未安装"}`,"ok",4200);
         }catch(e){ toast(e.message,"err",4200); }
         render();
+      });
+      $$("#node-grid [data-move]").forEach(b=>b.onclick=async()=>{
+        const idx = +b.dataset.move, dir = +b.dataset.dir;
+        const nodes = await api("/nodes");
+        const newIdx = idx + dir;
+        if(newIdx < 0 || newIdx >= nodes.length) return;
+        const ids = nodes.map(x=>x.id);
+        [ids[idx], ids[newIdx]] = [ids[newIdx], ids[idx]];
+        try{ await api("/nodes/reorder",{method:"POST",body:{ids}}); render(); }
+        catch(e){ toast(e.message,"err"); }
       });
       $$("#node-grid [data-del]").forEach(b=>b.onclick=()=>deleteNode(+b.dataset.del,b.dataset.name));
       $$("#node-grid [data-agent-cmd]").forEach(b=>b.onclick=async()=>{
@@ -878,6 +890,7 @@ async function viewApps(){
           <select id="machine-filter" class="select" style="margin-left:auto;width:auto;max-width:240px">
             <option value="all">全部机器</option>
           </select>
+          <button class="btn sm" id="btn-sync-machine" title="按机器合并重建 sing-box 配置，修复协议不通/互相覆盖">🔄 同步配置</button>
         </h4>
         <div class="table-wrap" style="margin-top:8px"><table>
           <thead><tr><th>机器</th><th>协议</th><th>端口</th><th>状态</th><th>操作</th></tr></thead>
@@ -1038,6 +1051,30 @@ async function loadApps(){
     $("#apps-body").innerHTML = rows.join("") || `<tr><td colspan="5" class="empty">暂无部署记录</td></tr>`;
 
     if(sel) sel.onchange = loadApps;
+
+    $("#btn-sync-machine").onclick = async ()=>{
+      const selVal = sel ? sel.value : "all";
+      const targets = [];
+      if(selVal === "all"){
+        // 全部机器：每个有应用的 node/container 同步一次
+        const seen = new Set();
+        list.forEach(a=>{
+          if(a.container_id && !seen.has(`c${a.container_id}`)){ seen.add(`c${a.container_id}`); targets.push({container_id:a.container_id}); }
+          else if(a.node_id && !seen.has(`h${a.node_id}`)){ seen.add(`h${a.node_id}`); targets.push({node_id:a.node_id}); }
+        });
+      } else if(selVal.startsWith("c-")){
+        targets.push({container_id: +selVal.slice(2)});
+      } else if(selVal.startsWith("h-")){
+        targets.push({node_id: +selVal.slice(2)});
+      }
+      if(!targets.length) return toast("没有可同步的机器","info");
+      try{
+        for(const t of targets){
+          await api("/apps/sync-machine",{method:"POST",body:t});
+        }
+        toast(`已同步 ${targets.length} 台机器配置`,"ok",4000);
+      }catch(e){ toast(e.message,"err",5000); }
+    };
 
     $$("#apps-body [data-del-node]").forEach(b=>b.onclick=async()=>{
       const appId = +b.dataset.delNode, idx = +b.dataset.idx;

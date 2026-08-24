@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS nodes(
   lxc_ok INTEGER DEFAULT 0,
   install_lxc INTEGER DEFAULT 0,      -- 0=仅部署节点(不装LXC) 1=作为母机(自动装LXC)
   lxc_install_ts TEXT DEFAULT '',     -- 最近一次自动安装LXC的时间戳(去重)
+  sort_order INTEGER DEFAULT 0,       -- 节点排序
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS containers(
@@ -139,13 +140,8 @@ SEED_USERS = [
 ]
 
 SEED_TEMPLATES = [
-    ("ubuntu-22.04",     "Ubuntu 22.04 LTS", "ubuntu",  "22.04 (jammy)", 182),
-    ("ubuntu-24.04",     "Ubuntu 24.04 LTS", "ubuntu",  "24.04 (noble)", 205),
     ("debian-12",        "Debian 12",        "debian",  "12 (bookworm)", 148),
     ("alpine-3.19",      "Alpine Linux",     "alpine",  "3.19",          8),
-    ("rockylinux-9",     "Rocky Linux",      "rocky",   "9.4",           210),
-    ("centos-stream-9",  "CentOS Stream",    "centos",  "9",             235),
-    ("fedora-39",        "Fedora Cloud",     "fedora",  "39",            190),
     ("archlinux",        "Arch Linux",       "arch",    "rolling",       165),
 ]
 
@@ -174,17 +170,24 @@ def migrate():
         _conn.commit()
         print("[db] apps.node_id added and backfilled")
 
-    # nodes 表补 agent 相关列
+    # nodes 表补 agent 相关列 + 排序
     ncols = [r[1] for r in _conn.execute("PRAGMA table_info(nodes)")]
     for col, ddl in (("agent_token", "TEXT DEFAULT ''"),
                      ("public_ip", "TEXT DEFAULT ''"),
                      ("last_seen", "TEXT DEFAULT ''"),
                      ("role", "TEXT DEFAULT 'manage'"),
                      ("install_lxc", "INTEGER DEFAULT 0"),
-                     ("lxc_install_ts", "TEXT DEFAULT ''")):
+                     ("lxc_install_ts", "TEXT DEFAULT ''"),
+                     ("sort_order", "INTEGER DEFAULT 0")):
         if ncols and col not in ncols:
             _conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {ddl}")
             print(f"[db] nodes.{col} added")
+
+    # 模板库只保留 alpine / debian / arch
+    keep = ("alpine-3.19", "debian-12", "archlinux")
+    _conn.execute("DELETE FROM templates WHERE key NOT IN (?,?,?)", keep)
+    _conn.commit()
+    print("[db] templates pruned to alpine/debian/arch")
 
 
 def seed():
