@@ -446,7 +446,8 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         db.ex("""INSERT INTO apps(container_id,name,app_type,params,links,dnat_rules,status,log,created_at)
                  VALUES(?,?,?,?,?,?,?,?,?)""",
               (container or {}).get("id"), name_prefix, "proxy",
-              json.dumps({"spec": [{k: v for k, v in n.items()} for n in spec]}, ensure_ascii=False),
+              json.dumps({"spec": [{k: v for k, v in n.items()} for n in spec],
+                          "public_ip": pub, "container_ip": cip}, ensure_ascii=False),
               json.dumps(links, ensure_ascii=False),
               json.dumps(dnat_rules), "done", "".join(j["log"]), db.now())
         app_id = db.one("SELECT id FROM apps ORDER BY id DESC LIMIT 1")["id"]

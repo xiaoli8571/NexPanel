@@ -166,9 +166,21 @@ def _get_node(nid: int):
     return dict(row)
 
 
+def _uninstall_cmd(base: str) -> str:
+    return f"curl -fsSL {base}/api/agent/uninstall.sh | bash"
+
+
 @router.get("/nodes")
-def list_nodes(user: dict = Depends(current_user)):
-    return [_node_out(r) for r in db.q("SELECT * FROM nodes ORDER BY id")]
+def list_nodes(request: Request, user: dict = Depends(current_user)):
+    base = _panel_base(request)
+    out = []
+    for r in db.q("SELECT * FROM nodes ORDER BY id"):
+        d = _node_out(r)
+        if r["kind"] == "agent":
+            d["install_cmd"] = _install_cmd(base, r["agent_token"])
+            d["uninstall_cmd"] = _uninstall_cmd(base)
+        out.append(d)
+    return out
 
 
 def _panel_base(request: Request) -> str:
@@ -212,11 +224,12 @@ def create_node(body: NodeIn, request: Request, admin: dict = Depends(require_ad
     if row["kind"] == "agent":
         monitor.touch_from_db(row)
         out = _node_out(row)
-        out["install_cmd"] = _install_cmd(_panel_base(request), row["agent_token"])
+        base = _panel_base(request)
+        out["install_cmd"] = _install_cmd(base, row["agent_token"])
+        out["uninstall_cmd"] = _uninstall_cmd(base)
+        db.audit(admin["sub"], "添加节点", body.name.strip(),
+                 f"{body.kind} {body.role}".strip(), request.client.host)
         return out
-    return _node_out(row)
-    row = dict(db.one("SELECT * FROM nodes WHERE name=?", (body.name.strip(),)))
-    monitor.start_node(row)
     db.audit(admin["sub"], "添加节点", body.name.strip(),
              f"{body.kind} {body.host}:{body.port}".strip(), request.client.host)
     return _node_out(row)
@@ -335,15 +348,26 @@ def install_sh(request: _Req, token: str = "", api: str = ""):
     return PlainTextResponse(script, media_type="text/x-shellscript")
 
 
-@router.post("/agent/poll")
-async def agent_poll(request: _Req):
+@router.get("/agent/uninstall.sh")
+def uninstall_sh():
+    """Agent/探针 一键清理脚本（无需鉴权，脚本本身不含任何敏感信息）"""
+    return PlainTextResponse(agent_mod.UNINSTALL_SH, media_type="text/x-shellscript")
+
+
+def _agent_auth(request: _Req) -> int:
+    """校验 Agent Bearer Token，返回 node_id"""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer ag_"):
         raise HTTPException(401, "bad agent")
     row = db.one("SELECT id FROM nodes WHERE agent_token=?", (auth[7:],))
     if not row:
         raise HTTPException(401, "unknown agent")
-    nid = row["id"]
+    return row["id"]
+
+
+@router.post("/agent/poll")
+async def agent_poll(request: _Req):
+    nid = _agent_auth(request)
     try:
         report = await request.json()
     except Exception:
@@ -359,6 +383,16 @@ async def agent_result(request: _Req):
     payload = await request.json()
     agent_mod.push_result(payload["id"], int(payload.get("rc", 0)),
                           base64_decode(payload.get("out", "")))
+    return {"ok": True}
+
+
+@router.post("/agent/pty_out")
+async def agent_pty_out(request: _Req):
+    """Agent PTY 输出回流（终端会话数据流）"""
+    nid = _agent_auth(request)
+    p = await request.json()
+    agent_mod.pty_push(nid, str(p.get("sid", "")), int(p.get("seq") or 0),
+                       str(p.get("data") or ""), bool(p.get("closed")))
     return {"ok": True}
 
 
@@ -439,6 +473,50 @@ async def del_app(app_id: int, request: Request, user: dict = Depends(require_ad
     except ValueError as e:
         raise HTTPException(404, str(e))
     return {"ok": True}
+
+
+# ────────────────────────── 订阅中心 ──────────────────────────
+@router.get("/sub/{token}")
+def subscription(token: str, target: str = "", request: _Req = None):
+    """公开订阅端点（对标 X-UI-Server /api/sub）
+    · UA 含 clash/mihomo/stash/sing-box… 或 ?target=clash → Clash.Meta YAML
+    · 否则 → base64(分享链接列表)
+    """
+    from . import subscribe as sub_mod
+    real = sub_mod.get_or_create_sub_token()
+    if not token or token != real:
+        raise HTTPException(404, "Not found")
+    ua = request.headers.get("user-agent", "") if request else ""
+    body, ctype, disp = sub_mod.render_subscription(ua, target)
+    headers = {"Cache-Control": "no-store"}
+    if disp:
+        headers["Content-Disposition"] = disp
+    return PlainTextResponse(body, media_type=ctype, headers=headers)
+
+
+@router.get("/apps/sub-info")
+def sub_info(request: Request, user: dict = Depends(current_user)):
+    """面板内展示订阅地址（需登录）"""
+    from . import subscribe as sub_mod
+    tok = sub_mod.get_or_create_sub_token()
+    base = _panel_base(request)
+    n = len(sub_mod.collect_specs())
+    return {
+        "token": tok,
+        "url": f"{base}/api/sub/{tok}",
+        "clash_url": f"{base}/api/sub/{tok}?target=clash",
+        "nodes": n,
+    }
+
+
+@router.post("/apps/sub-reset")
+def sub_reset(request: Request, admin: dict = Depends(require_admin)):
+    """重置订阅 Token（旧链接立即失效）"""
+    from . import subscribe as sub_mod
+    tok = sub_mod.reset_sub_token()
+    base = _panel_base(request)
+    db.audit(admin["sub"], "重置订阅令牌", "system", "", request.client.host)
+    return {"ok": True, "token": tok, "url": f"{base}/api/sub/{tok}"}
 
 
 # ────────────────────────── 探针监控 ──────────────────────────

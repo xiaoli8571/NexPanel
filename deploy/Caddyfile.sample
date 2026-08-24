@@ -1,0 +1,12 @@
+hy.720820.xyz {
+	encode gzip
+	reverse_proxy 127.0.0.1:8091
+
+	header {
+		Strict-Transport-Security "max-age=15552000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

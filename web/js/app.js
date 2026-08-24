@@ -45,6 +45,7 @@ const P = {
   drive:`<line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/>`,
   activity:`<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>`,
   zap:`<polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/>`,
+  link:`<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>`,
   server:`<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>`,
 };
 const MEM_PRESETS = [64,128,256,384,512,768,1024,1536,2048,3072,4096,6144,8192,12288,16384];
@@ -427,7 +428,10 @@ async function viewNodes(){
           </div>
           <div class="actions-cell" style="margin-top:12px">
             <button class="btn sm" data-probe="${n.id}">${icon("activity",12)} 测试</button>
-            ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 命令</button>`:""}
+            ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 接入</button>`:""}
+            ${(n.kind==="ssh"||(n.kind==="agent"&&!isProbe))&&n.status==="online"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
+            ${n.kind==="demo"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="演示控制台">${icon("server",12)} 终端</button>`:""}
+            ${n.kind==="agent"?`<button class="btn sm" data-uninst="${n.id}" title="生成一键清理命令">${icon("trash",12)} 卸载</button>`:""}
             <button class="btn sm danger" data-del="${n.id}" data-name="${esc(n.name)}">${icon("trash",12)} 删除</button>
           </div>
         </div>`;
@@ -446,16 +450,14 @@ async function viewNodes(){
       $$("#node-grid [data-agent-cmd]").forEach(b=>b.onclick=async()=>{
         const n = (await api("/nodes")).find(x=>String(x.id)===b.dataset.agentCmd);
         if(!n?.install_cmd){ toast("未生成安装命令","err"); return; }
-        const ov = openModal(`Agent 接入命令 — <b>${esc(n.name)}</b>`, `
-          <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
-            在目标 VPS 上以 root 执行以下命令（需 curl），完成后节点自动上线：</p>
-          <div class="term" style="height:auto;padding:12px;user-select:all" id="cmd-box">curl -fsSL ${new URL(location.href).origin}/api/agent/install.sh | bash -s -- --api ${new URL(location.href).origin} --token ${n.agent_token}</div>
-          <button class="btn primary block" style="margin-top:12px" onclick="copyText(document.getElementById('cmd-box').textContent);">📋 复制命令</button>
-          <p style="color:var(--muted);font-size:11.5px;margin-top:10px">
-            Agent 将反向连接面板（支持 NAT 后机器），每 3 秒心跳上报，Token 可随时轮换吊销。</p>`,
-          null, "", {wide:true});
-        ov.querySelector(".modal-foot").remove();
+        showAgentCmdModal(n);
       });
+      $$("#node-grid [data-uninst]").forEach(b=>b.onclick=async()=>{
+        const n = (await api("/nodes")).find(x=>String(x.id)===b.dataset.uninst);
+        if(!n){ toast("节点不存在","err"); return; }
+        showUninstallModal(n);
+      });
+      $$("#node-grid [data-term]").forEach(b=>b.onclick=()=>openNodeTerminal(+b.dataset.term, b.dataset.name));
       $$("#node-grid [data-install]").forEach(b=>b.onclick=async()=>{
         b.disabled=true; b.textContent="安装中…";
         toast("正在通过 SSH 安装 LXC，可能需要几分钟…","info",6000);
@@ -471,23 +473,33 @@ async function viewNodes(){
   tickHandle = setInterval(render, 5000);
 }
 
-function deleteNode(id,name){
-  confirmModal(`确定删除节点 <b>${esc(name)}</b>？其下实例将被一并删除。`,true)
-  .then(async yes=>{
-    if(!yes) return;
-    try{
-      await api(`/nodes/${id}`, {method:"DELETE"});       // 先尝试普通删除
-      toast("节点已删除","ok"); viewNodes();
-    }catch(e){
-      if(String(e.message).includes("强制删除")){
-        if(await confirmModal("该节点下仍有实例，确认<b>连同全部实例一起删除</b>？",true)){
-          try{ await api(`/nodes/${id}?force=1`,{method:"DELETE"}); toast("节点及实例已删除","ok"); viewNodes(); }
-          catch(e2){ toast(e2.message,"err"); }
-        }
-      } else toast(e.message,"err");
-    }
-  });
-}
+window.deleteNode = async function(id, name){
+  let node = null;
+  try{ node = (await api("/nodes")).find(x=>+x.id===+id); }catch(e){}
+  const isAgent = node && node.kind === "agent";
+  const base = location.origin;
+  const ucmd = (node && node.uninstall_cmd) || `curl -fsSL ${base}/api/agent/uninstall.sh | bash`;
+  const extra = isAgent ? `
+    <p style="color:var(--muted);font-size:12px;line-height:1.8;margin-top:10px">
+      若还要清理目标机上的 Agent/探针程序，请先在目标服务器以 root 执行：</p>
+    <div class="term" style="height:auto;padding:10px;user-select:all;word-break:break-all" id="del-uninst-cmd">${esc(ucmd)}</div>
+    <button class="btn sm block" style="margin-top:8px" onclick="copyText(document.getElementById('del-uninst-cmd').textContent)">📋 复制清理命令</button>` : "";
+  const ok = await confirmModal(
+    `确定删除节点 <b>${esc(name)}</b>？其下实例将被一并删除。<span style="color:var(--muted);font-size:12px">（仅移除面板记录，不改变目标机上的程序）</span>${extra}`,
+    true);
+  if(!ok) return;
+  try{
+    await api(`/nodes/${id}`, {method:"DELETE"});       // 先尝试普通删除
+    toast(isAgent?"节点已删除。如需彻底清除目标机程序，请执行上方清理命令":"节点已删除","ok",isAgent?6000:3000); viewNodes();
+  }catch(e){
+    if(String(e.message).includes("强制删除")){
+      if(await confirmModal("该节点下仍有实例，确认<b>连同全部实例一起删除</b>？",true)){
+        try{ await api(`/nodes/${id}?force=1`,{method:"DELETE"}); toast("节点及实例已删除","ok"); viewNodes(); }
+        catch(e2){ toast(e2.message,"err"); }
+      }
+    } else toast(e.message,"err");
+  }
+};
 
 function openNodeModal(){
   openModal("接入服务器", `
@@ -558,7 +570,8 @@ function openNodeModal(){
 
 function showAgentCmdModal(node){
   const base = location.origin;
-  const cmd = `curl -fsSL ${base}/api/agent/install.sh | bash -s -- --api ${base} --token ${node.agent_token}`;
+  const cmd = node.install_cmd ||
+    `curl -fsSL ${base}/api/agent/install.sh | bash -s -- --api ${base} --token ${node.agent_token}`;
   const ov = openModal(`⚡ 接入 <b>${esc(node.name)}</b> — 在目标 VPS 执行`, `
     <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
       SSH 登录目标 VPS，以 root 运行以下<b>一行命令</b>（需 curl）。执行完成后本节点将自动上线，
@@ -572,6 +585,24 @@ function showAgentCmdModal(node){
     null, "", {wide:true});
   ov.querySelector(".modal-foot").remove();
 }
+
+/* ── Agent / 探针 一键清理命令 ── */
+window.showUninstallModal = function(node){
+  const base = location.origin;
+  const cmd = node.uninstall_cmd || `curl -fsSL ${base}/api/agent/uninstall.sh | bash`;
+  const ov = openModal(`🧹 清理 Agent/探针 — <b>${esc(node.name)}</b>`, `
+    <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
+      SSH 登录目标服务器，以 root 运行以下<b>一行命令</b>，即可停止并彻底清除面板部署在该机器上的
+      Agent / 探针（停止服务 → 删除 systemd 单元 → 删除程序目录）：</p>
+    <div class="term" style="height:auto;padding:14px;user-select:all;word-break:break-all" id="uninst-cmd-box">${esc(cmd)}</div>
+    <button class="btn primary block" style="margin-top:12px" onclick="copyText(document.getElementById('uninst-cmd-box').textContent)">📋 复制清理命令</button>
+    <p style="color:var(--muted);font-size:11.5px;margin-top:10px;line-height:1.7">
+      · 仅移除目标机上的 lxcdeck-agent，不影响系统其他部分<br>
+      · 执行后节点转为离线，随后可在面板中删除该节点记录<br>
+      · 探针与 Agent 为同一程序，清理命令相同</p>`,
+    null, "", {wide:true});
+  ov.querySelector(".modal-foot").remove();
+};
 
 /* ══════════════ 视图：容器实例 ══════════════ */
 const DISTRO_META = {
@@ -778,6 +809,8 @@ async function viewApps(){
   $("#content").innerHTML = `
   <div class="page-head">
     <span class="sub">把代理协议栈一键下发到指定 LXC 容器或 VPS 主机（sing-box 内核 · 支持 8合1）</span>
+    <span class="spacer"></span>
+    <button class="btn primary" id="btn-sub">${icon("link",14)} 🔗 订阅</button>
   </div>
   <div class="cols-2-1">
     <div>
@@ -865,6 +898,7 @@ async function viewApps(){
   $("#d-app").dispatchEvent(new Event("change"));
 
   loadApps();
+  $("#btn-sub").onclick = openSubModal;
   $("#btn-deploy").onclick = async ()=>{
     const isHost = $("#d-target-type").value==="host";
     const appLabel = $("#d-app").options[$("#d-app").selectedIndex].text;
@@ -959,6 +993,36 @@ async function loadApps(){
   }catch(e){}
 }
 
+/* ── 订阅中心弹窗 ── */
+window.openSubModal = async function(){
+  try{
+    const info = await api("/apps/sub-info");
+    const ov = openModal(`🔗 订阅中心`, `
+      <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
+        将以下订阅链接导入客户端即可自动同步面板下发的全部节点（当前 <b>${info.nodes}</b> 个）。
+        链接按 User-Agent 自动适配格式。</p>
+      <label style="display:block;font-size:12px;color:var(--muted)">通用订阅（v2rayNG / Shadowrocket / NekoBox，Base64）</label>
+      <div class="term" style="height:auto;padding:12px;user-select:all;word-break:break-all" id="sub-url-box">${esc(info.url)}</div>
+      <button class="btn sm block" style="margin-top:8px" onclick="copyText(document.getElementById('sub-url-box').textContent)">📋 复制订阅链接</button>
+      <label style="display:block;font-size:12px;color:var(--muted);margin-top:14px">Clash / mihomo / Stash / FlClash（YAML）</label>
+      <div class="term" style="height:auto;padding:12px;user-select:all;word-break:break-all" id="sub-clash-box">${esc(info.clash_url)}</div>
+      <button class="btn sm block" style="margin-top:8px" onclick="copyText(document.getElementById('sub-clash-box').textContent)">📋 复制 Clash 订阅</button>
+      <p style="color:var(--muted);font-size:11.5px;margin-top:12px;line-height:1.7">
+        · 新部署节点后客户端刷新订阅即可拉取<br>
+        · Token 泄露时可重置，旧链接立即失效<br></p>
+      <button class="btn danger sm block" style="margin-top:10px" id="btn-sub-reset">♻️ 重置订阅令牌</button>`,
+      null, "", {wide:true});
+    ov.querySelector(".modal-foot").remove();
+    ov.querySelector("#btn-sub-reset").onclick = async ()=>{
+      if(!(await confirmModal("确定重置订阅令牌？所有已分发的旧订阅链接将立即失效。",true))) return;
+      try{
+        const r = await api("/apps/sub-reset",{method:"POST"});
+        closeModal(); toast("订阅令牌已重置","ok"); openSubModal();
+      }catch(e){ toast(e.message,"err"); }
+    };
+  }catch(e){ toast(e.message,"err"); }
+};
+
 /* ══════════════ 视图：主机探针 ══════════════ */
 async function viewProbes(){
   $("#content").innerHTML = `
@@ -996,6 +1060,7 @@ async function viewProbes(){
           </div>
           <div class="actions-cell" style="margin-top:12px">
             <button class="btn sm" data-show-cmd="${p.id}">${icon("term",12)} 接入命令</button>
+            <button class="btn sm" data-uninst-cmd="${p.id}" title="生成一键清理命令">${icon("trash",12)} 卸载</button>
             <button class="btn sm danger" data-del="${p.id}" data-name="${esc(p.name)}">${icon("trash",12)} 删除</button>
           </div></div>`;
       }).join("") || `<div class="empty" style="grid-column:1/-1;padding:60px 0">
@@ -1006,6 +1071,12 @@ async function viewProbes(){
         b.onclick=async()=>{
           const n=(await api("/nodes")).find(x=>String(x.id)===b.dataset.showCmd);
           if(n) showAgentCmdModal(n);
+        };
+      });
+      $$("#probe-grid [data-uninst-cmd]").forEach(async b=>{
+        b.onclick=async()=>{
+          const n=(await api("/nodes")).find(x=>String(x.id)===b.dataset.uninstCmd);
+          if(n) showUninstallModal(n); else toast("节点不存在","err");
         };
       });
       $$("#probe-grid .card")[0]?.classList.add("done");
@@ -1259,13 +1330,19 @@ function openModal(title, bodyHTML, onOk, okText="确定", opts={}){
         <button class="btn primary" data-ok>${okText}</button>
       </div>
     </div>`;
+  if(opts.onclose) ov._onclose = opts.onclose;
   document.getElementById("modals").appendChild(ov);
   ov.addEventListener("click", e=>{ if(e.target===ov) closeModal(); });
   ov.querySelectorAll("[data-x]").forEach(b=>b.onclick=closeModal);
   if(onOk) ov.querySelector("[data-ok]").onclick = onOk;
   return ov;
 }
-function closeModal(){ $$("#modals .overlay").forEach(o=>o.remove()); }
+function closeModal(){
+  $$("#modals .overlay").forEach(o=>{
+    try{ o._onclose && o._onclose(); }catch(e){}
+    o.remove();
+  });
+}
 
 function confirmModal(msgHTML, danger=false){
   return new Promise(resolve=>{
@@ -1277,74 +1354,251 @@ function confirmModal(msgHTML, danger=false){
   });
 }
 
-/* ══════════════ WebSocket 终端 ══════════════ */
+/* ══════════════ WebSocket 终端（原始模式 + 轻量 ANSI 渲染） ══════════════ */
 function closeWS(){ if(wsRef){ try{ wsRef.close(); }catch(e){} wsRef=null; } }
 
-window.openConsole = function(cid, name){
+/* 迷你终端仿真器：字符网格 + 常用 ANSI/VT 序列 */
+class MiniTerm {
+  constructor(el, cols=120, rows=32){
+    this.el = el; this.cols = cols; this.rows = rows;
+    this.grid = []; this.cr = 0; this.cc = 0;
+    this.fg = ""; this.bold = false;
+    this.alt = null;
+    for(let r=0;r<rows;r++) this.grid.push(new Array(cols).fill(null));
+  }
+  resize(cols, rows){
+    this.cols = cols; this.rows = rows;
+    const ng = [];
+    for(let r=0;r<rows;r++){
+      const src = this.grid[r] || [];
+      const line = new Array(cols).fill(null);
+      for(let c=0;c<Math.min(cols, src.length);c++) line[c]=src[c];
+      ng.push(line);
+    }
+    this.grid = ng; this.cr = Math.min(this.cr, rows-1); this.cc = Math.min(this.cc, cols-1);
+  }
+  clear(){ for(let r=0;r<this.rows;r++) this.grid[r].fill(null); this.cr=0; this.cc=0; }
+  _put(ch){
+    if(this.cc >= this.cols){ this.cc = 0; this._lf(); }
+    if(this.cr >= this.rows) this.cr = this.rows-1;
+    this.grid[this.cr][this.cc] = { ch, fg:this.fg, b:this.bold };
+    this.cc++;
+  }
+  _lf(){
+    if(this.cr >= this.rows-1){ this.grid.shift(); this.grid.push(new Array(this.cols).fill(null)); }
+    else this.cr++;
+  }
+  _sgr(ps){
+    for(const n of ps){
+      if(n===0){ this.fg=""; this.bold=false; }
+      else if(n===1) this.bold=true;
+      else if(n===22) this.bold=false;
+      else if((n>=30&&n<=37)||n===39||(n>=90&&n<=97)){
+        const map={30:"#64748b",31:"#ef4444",32:"#22c55e",33:"#eab308",34:"#3b82f6",35:"#d946ef",36:"#06b6d4",37:"#e2e8f0",90:"#94a3b8",91:"#f87171",92:"#4ade80",93:"#facc15",94:"#60a5fa",95:"#e879f9",96:"#22d3ee",97:"#f1f5f9"};
+        this.fg = n===39 ? "" : (map[n]||"");
+      }
+    }
+  }
+  feed(text){
+    let i = 0;
+    while(i < text.length){
+      const ch = text[i];
+      if(ch === "\x1b"){
+        // CSI / OSC / ESC 序列
+        if(text[i+1] === "["){
+          let j = i+2;
+          while(j < text.length && !/[A-Za-z@]/.test(text[j])) j++;
+          if(j >= text.length) break;
+          const seq = text.slice(i+2, j), fin = text[j]; i = j+1;
+          const ps = seq.split(";").map(x=>parseInt(x)||0);
+          switch(fin){
+            case "A": this.cr = Math.max(0, this.cr-(ps[0]||1)); break;
+            case "B": this.cr = Math.min(this.rows-1, this.cr+(ps[0]||1)); break;
+            case "C": this.cc = Math.min(this.cols-1, this.cc+(ps[0]||1)); break;
+            case "D": this.cc = Math.max(0, this.cc-(ps[0]||1)); break;
+            case "E": this.cr = Math.min(this.rows-1, this.cr+(ps[0]||1)); this.cc=0; break;
+            case "F": this.cr = Math.max(0, this.cr-(ps[0]||1)); this.cc=0; break;
+            case "G": this.cc = Math.min(this.cols-1, Math.max(0,(ps[0]||1)-1)); break;
+            case "H": case "f":
+              this.cr = Math.min(this.rows-1, Math.max(0,(ps[0]||1)-1));
+              this.cc = Math.min(this.cols-1, Math.max(0,(ps[1]||1)-1)); break;
+            case "J":
+              if(!ps[0]||ps[0]===0){ for(let c=this.cc;c<this.cols;c++) this.grid[this.cr][c]=null;
+                for(let r=this.cr+1;r<this.rows;r++) this.grid[r].fill(null); }
+              else { for(let r=0;r<this.rows;r++) this.grid[r].fill(null); }
+              break;
+            case "K":
+              if(!ps[0]){ for(let c=this.cc;c<this.cols;c++) this.grid[this.cr][c]=null; }
+              else if(ps[0]===1){ for(let c=0;c<=this.cc;c++) this.grid[this.cr][c]=null; }
+              else this.grid[this.cr].fill(null);
+              break;
+            case "m": this._sgr(seq===""?[0]:ps); break;
+            case "h": case "l":
+              if(/1049|1047|1048/.test(seq)){   // 备选屏幕：直接清屏
+                this.clear();
+              }
+              break;
+            default: break;
+          }
+        } else if(text[i+1] === "]"){           // OSC: 跳过直到 BEL/ST
+          let j = text.indexOf("\x07", i+2);
+          const st = text.indexOf("\x1b\\", i+2);
+          if(j === -1 && st !== -1) j = st+1;
+          if(j === -1){ break; }                // 不完整，丢弃剩余
+          i = j+1;
+        } else {
+          i += 2;                               // 其他两字节转义忽略
+        }
+      } else if(ch === "\r"){ this.cc = 0; i++; }
+      else if(ch === "\n"){ this._lf(); i++; }
+      else if(ch === "\b" || ch === "\x7f"){ this.cc = Math.max(0, this.cc-1); i++; }
+      else if(ch === "\t"){
+        const nxt = Math.min(this.cols-1, (Math.floor(this.cc/8)+1)*8);
+        while(this.cc < nxt){ this._put(" "); }
+        i++;
+      } else if(ch === "\x07"){ i++; }
+      else if(ch < " "){ i++; }
+      else {
+        // UTF-8 多字节字符按码点处理
+        const cp = text.codePointAt(i);
+        const width = String.fromCodePoint(cp);
+        this._put(width);
+        if(cp > 0xFFFF){                        // 代理对占两列
+          if(this.cc < this.cols) this.grid[this.cr][this.cc] = {ch:"",fg:"",b:false};
+          this.cc++;
+        }
+        i += width.length;
+      }
+    }
+  }
+  html(showCaret=false){
+    const out = [];
+    for(let r=0;r<this.rows;r++){
+      let line = "", run = "", cfg = "", cb = false;
+      const flush = ()=>{
+        if(run){
+          const style = cfg ? `color:${cfg}` : "";
+          line += (style||cb) ? `<span style="${style}${cb?";font-weight:600":""}">${run}</span>` : run;
+        }
+        run = "";
+      };
+      for(let c=0;c<this.cols;c++){
+        if(showCaret && r===this.cr && c===this.cc){ flush(); line += `<span class="t-caret"></span>`; }
+        const cell = this.grid[r][c];
+        const f = cell ? cell.fg : "", b = cell ? cell.b : false;
+        if(f!==cfg || b!==cb){ flush(); cfg=f; cb=b; }
+        run += (cell && cell.ch) ? esc(cell.ch) : "&nbsp;";
+        if(c === this.cols-1) flush();
+      }
+      out.push(`<div class="t-line">${line}</div>`);
+    }
+    return out.join("");
+  }
+}
+
+/* 终端弹窗通用骨架：raw 按键 → JSON 信封；输出 → MiniTerm 渲染 */
+function openTermModal(title, wsUrl, opts={}){
   const ov = openModal(`<span style="display:inline-flex;gap:8px;align-items:center">
-      ${icon("term",16)} root@${esc(name)} — 交互式控制台</span>`,
-    `<div class="term" id="term-out"></div>
-     <div style="position:absolute;left:-9999px"><input id="term-input"></div>
+      ${icon("term",16)} ${esc(title)}</span>`,
+    `<div class="term" id="term-out" style="overflow:auto"></div>
      <p class="sub" style="color:var(--muted);font-size:11.5px;margin-top:8px">
-       提示：试试 <code>help</code> / <code>neofetch</code> / <code>free -m</code> / <code>ip a</code>，
-       ↑↓ 可翻阅历史命令</p>`,
-    null, "", { wide:true });
+       原始终端模式：支持 <code>Ctrl+C</code> / <code>Ctrl+L</code> / 方向键 / Tab 补全，
+       可直接运行 <code>top</code> 等全屏程序。点击终端区域获取焦点。</p>`,
+    null, "", { wide:true, onclose: ()=>{ closeWS(); clearInterval(repaint); window.removeEventListener("keydown", keyHandler, true); } });
   ov.querySelector(".modal-foot").remove();
 
   const out = ov.querySelector("#term-out");
-  const input = ov.querySelector("#term-input");
-  let buf = ""; const history = []; let hi = -1;
-  const promptHTML = `<span class="t-prompt">root@${esc(name)}:~#</span>&nbsp;`;
+  out.style.whiteSpace = "pre";
+  out.style.fontFamily = "var(--mono)";
+  out.style.fontSize = "12px";
+  out.tabIndex = 0;
 
-  const scroll = ()=>{ out.scrollTop = out.scrollHeight; };
-  const addLine = (html, cls="")=>{
-    const div = document.createElement("div");
-    div.className = `t-line ${cls}`; div.innerHTML = html;
-    out.appendChild(div); scroll();
+  const term = new MiniTerm(out, 120, 32);
+  let repaint = null;
+
+  const sendRaw = data =>{ if(wsRef && wsRef.readyState===1)
+    wsRef.send(JSON.stringify({type:"input", data})); };
+  const doResize = ()=>{
+    const cw = measure(), rect = out.getBoundingClientRect();
+    const cols = Math.max(40, Math.min(500, Math.floor(rect.width/cw.w)));
+    const rows = Math.max(8, Math.min(300, Math.floor(rect.height/cw.h)));
+    term.resize(cols, rows);
+    if(wsRef && wsRef.readyState===1)
+      wsRef.send(JSON.stringify({type:"resize", cols, rows}));
   };
-  const redrawInput = ()=>{
-    let el = out.querySelector(".t-input-line");
-    if(!el){ el=document.createElement("div"); el.className="t-line t-input-line"; out.appendChild(el); }
-    el.innerHTML = `${promptHTML}<span class="t-cmd">${esc(buf)}</span><span class="t-caret"></span>`;
-    scroll();
-  };
 
-  out.addEventListener("click", ()=>input.focus());
-
-  function send(line){
-    buf=""; history.push(line); hi=history.length;
-    addLine(`${promptHTML}<span class="t-cmd">${esc(line)}</span>`);
-    const ph = out.querySelector(".t-input-line"); if(ph) ph.remove();
-    if(wsRef && wsRef.readyState===1) wsRef.send(line);
+  function measure(){
+    const probe = document.createElement("span");
+    probe.textContent = "M".repeat(20);
+    probe.style.cssText = "position:absolute;visibility:hidden;font-family:var(--mono);font-size:12px;white-space:pre";
+    document.body.appendChild(probe);
+    const w = probe.getBoundingClientRect().width/20, h = 18;
+    probe.remove();
+    return {w, h};
   }
 
-  input.addEventListener("keydown", e=>{
-    if(e.key==="Enter"){ send(buf); e.preventDefault(); }
-    else if(e.key==="Backspace"){ buf = buf.slice(0,-1); redrawInput(); e.preventDefault(); }
-    else if(e.key==="ArrowUp"){ if(hi>0){ hi--; buf=history[hi]||""; redrawInput(); } e.preventDefault(); }
-    else if(e.key==="ArrowDown"){ if(hi<history.length){ hi++; buf=history[hi]||""; redrawInput(); } e.preventDefault(); }
-    else if(e.key==="l" && e.ctrlKey){ out.innerHTML=""; redrawInput(); e.preventDefault(); }
-    else if(e.key.length===1 && !e.ctrlKey && !e.metaKey){ buf+=e.key; redrawInput(); e.preventDefault(); }
-  });
+  const paint = ()=>{
+    if(!ov.isConnected){ clearInterval(repaint); return; }
+    const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 24;
+    out.innerHTML = term.html(true);
+    if(atBottom) out.scrollTop = out.scrollHeight;
+  };
+  repaint = setInterval(paint, 120);
 
-  // 建立 WebSocket
-  const proto = location.protocol==="https:"?"wss":"ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws/terminal/${cid}?token=${encodeURIComponent(state.token)}`);
-  wsRef = ws;
-  ws.onmessage = ev=>{
-    let m; try{ m=JSON.parse(ev.data); }catch(_){ return; }
-    if(m.type==="clear"){ out.innerHTML=""; redrawInput(); return; }
-    if(m.type==="out"){
-      m.text.split(/\r?\n/).forEach((ln,i)=>{
-        ln = ln.replace(/&/g,"&amp;").replace(/</g,"&lt;");
-        addLine(ln || "&nbsp;");
-      });
+  function keyHandler(e){
+    if(wsRef !== ws || !ov.isConnected) return;
+    if(document.activeElement !== out && !out.contains(document.activeElement)) return;
+    const k = e.key;
+    let data = null;
+    if(k === "Enter") data = "\r";
+    else if(k === "Backspace") data = "\x7f";
+    else if(k === "Tab") data = "\t";
+    else if(k === "Escape") data = "\x1b";
+    else if(k === "ArrowUp") data = "\x1b[A";
+    else if(k === "ArrowDown") data = "\x1b[B";
+    else if(k === "ArrowRight") data = "\x1b[C";
+    else if(k === "ArrowLeft") data = "\x1b[D";
+    else if(k === "Home") data = "\x1b[H";
+    else if(k === "End") data = "\x1b[F";
+    else if(k === "Delete") data = "\x1b[3~";
+    else if(k === "PageUp") data = "\x1b[5~";
+    else if(k === "PageDown") data = "\x1b[6~";
+    else if(e.ctrlKey && !e.altKey && k.length===1){
+      const c = k.toUpperCase().charCodeAt(0)-64;
+      if(c > 0 && c < 27) data = String.fromCharCode(c);
     }
-    if(m.type==="closed"){ addLine('<span style="color:var(--warn)">— 连接已断开 —</span>'); }
+    else if(k.length===1 && !e.ctrlKey && !e.metaKey && !e.altKey) data = k;
+    if(data !== null){
+      e.preventDefault(); e.stopPropagation();
+      sendRaw(data);
+    }
+  }
+  window.addEventListener("keydown", keyHandler, true);
+  out.addEventListener("click", ()=>out.focus());
+
+  const proto = location.protocol==="https:"?"wss":"ws";
+  const ws = new WebSocket(`${proto}://${location.host}${wsUrl}`);
+  wsRef = ws;
+  ws.onopen = ()=>{ out.focus(); doResize(); paint(); };
+  ws.onmessage = ev=>{
+    let m; try{ m = JSON.parse(ev.data); }catch(_){ return; }
+    if(m.type === "out") term.feed(m.text);
+    else if(m.type === "clear") term.clear();
+    else if(m.type === "closed") term.feed("\r\n\x1b[33m— 连接已断开 —\x1b[0m\r\n");
   };
-  ws.onopen = ()=>{ redrawInput(); input.focus(); };
   ws.onclose = ()=>{
-    if(wsRef===ws){ wsRef=null; }
-    addLine('<span style="color:var(--warn)">— 会话结束 —</span>');
+    if(wsRef === ws) wsRef = null;
+    term.feed("\r\n\x1b[33m— 会话结束 —\x1b[0m\r\n");
   };
+  return ov;
+}
+
+/* 容器控制台（小鸡） */
+window.openConsole = function(cid, name){
+  openTermModal(`root@${name} — 容器控制台`, `/ws/terminal/${cid}?token=${encodeURIComponent(state.token)}`);
+};
+
+/* 母机控制台 */
+window.openNodeTerminal = function(nid, name){
+  openTermModal(`${name} — 母机控制台`, `/ws/node-terminal/${nid}?token=${encodeURIComponent(state.token)}`);
 };

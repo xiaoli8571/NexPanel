@@ -1,7 +1,8 @@
 """Agent 体系：
 * AGENT_PY   部署到目标 VPS 的常驻代理(纯标准库, HTTP 轮询, 无依赖)
-* 面板侧     待下发命令队列 / 结果回收 / 心跳指标入缓存
+* 面板侧     待下发命令队列 / 结果回收 / 心跳指标入缓存 / PTY 终端流转发
 """
+import asyncio
 import base64
 import secrets
 import subprocess
@@ -11,6 +12,65 @@ import time
 _pending: dict[int, list] = {}       # node_id -> [cmd,...]
 _results: dict[str, dict] = {}       # cmd_id -> {"rc":..,"out":..} / event style
 _live: dict[int, float] = {}         # node_id -> last_seen ts (ws/http 均可)
+
+# ── PTY 终端会话（浏览器 ⇄ 面板 ⇄ Agent 轮询流） ──
+_pty_subs: dict[str, asyncio.Queue] = {}   # sid -> 输出队列 (str chunk / "__CLOSED__")
+_pty_node: dict[str, int] = {}             # sid -> node_id (校验 pty_out 归属)
+
+
+def open_pty(node_id: int, cmd: str, cols: int = 120, rows: int = 32) -> str:
+    """在目标 Agent 上开启 PTY 会话，返回 sid"""
+    sid = "p" + secrets.token_hex(8)
+    _pty_subs[sid] = asyncio.Queue(maxsize=2000)
+    _pty_node[sid] = node_id
+    _pending.setdefault(node_id, []).append(
+        {"id": "o" + secrets.token_hex(6), "op": "pty_open", "sid": sid,
+         "cmd": cmd, "cols": max(40, min(cols, 500)), "rows": max(8, min(rows, 300))})
+    return sid
+
+
+def pty_input(sid: str, data: str):
+    nid = _pty_node.get(sid)
+    if nid is not None:
+        _pending.setdefault(nid, []).append(
+            {"id": "i" + secrets.token_hex(6), "op": "pty_in", "sid": sid,
+             "data": base64.b64encode(data.encode("utf-8", errors="replace")).decode()})
+
+
+def pty_resize(sid: str, cols: int, rows: int):
+    nid = _pty_node.get(sid)
+    if nid is not None:
+        _pending.setdefault(nid, []).append(
+            {"id": "w" + secrets.token_hex(6), "op": "pty_win", "sid": sid,
+             "cols": max(40, min(cols, 500)), "rows": max(8, min(rows, 300))})
+
+
+def close_pty(sid: str):
+    """通知 Agent 关闭 PTY 并清理面板侧状态"""
+    nid = _pty_node.pop(sid, None)
+    q = _pty_subs.pop(sid, None)
+    if nid is not None:
+        _pending.setdefault(nid, []).append(
+            {"id": "x" + secrets.token_hex(6), "op": "pty_close", "sid": sid})
+
+
+def pty_push(node_id: int, sid: str, seq: int, data_b64: str, closed: bool) -> bool:
+    """Agent 上报输出 → 推入订阅队列；返回 sid 是否仍有效"""
+    if _pty_subs.get(sid) is None or _pty_node.get(sid) != node_id:
+        return False
+    q = _pty_subs[sid]
+    try:
+        if closed and seq == 0:
+            return True                      # 未知会话的关闭包，忽略
+        text = base64.b64decode(data_b64.encode()).decode("utf-8", errors="replace")
+        if q.full():
+            q.get_nowait()                   # 丢弃最旧，防止内存膨胀
+        q.put_nowait(text)
+        if closed:
+            q.put_nowait("__CLOSED__")
+        return True
+    except Exception:
+        return False
 
 
 def new_token() -> str:
@@ -216,6 +276,131 @@ def full_report():
 
 _running: dict = {}
 
+# ────────────── PTY 终端会话（浏览器 ⇄ 面板 ⇄ 本机） ──────────────
+PTY: dict = {}          # sid -> {"m":master_fd,"p":Popen,"buf":bytearray,"seq":int,"eof":bool}
+
+
+def _pty_open(cmd, sid, cols=120, rows=32):
+    import fcntl, pty as _pty, signal, struct, termios
+    try:
+        mfd, sfd = _pty.openpty()
+        p = subprocess.Popen(["bash", "-lc", cmd], stdin=sfd, stdout=sfd,
+                             stderr=sfd, preexec_fn=os.setsid, close_fds=True)
+        os.close(sfd)
+        try:
+            fcntl.ioctl(mfd, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", int(rows), int(cols), 0, 0))
+        except Exception:
+            pass
+        PTY[sid] = {"m": mfd, "p": p, "buf": bytearray(), "seq": 0, "eof": False}
+        threading.Thread(target=_pty_read, args=(sid,), daemon=True).start()
+        threading.Thread(target=_pty_flush, args=(sid,), daemon=True).start()
+        log(f"pty open {sid}: {cmd[:60]}")
+    except Exception as e:
+        log(f"pty open fail {sid}: {e}")
+        try:
+            http("/api/agent/pty_out",
+                 {"sid": sid, "seq": 0,
+                  "data": base64.b64encode(f"\r\n[agent] PTY 创建失败: {e}\r\n".encode()).decode(),
+                  "closed": True}, timeout=10)
+        except Exception:
+            pass
+
+
+def _pty_read(sid):
+    s = PTY.get(sid)
+    if not s:
+        return
+    while sid in PTY:
+        try:
+            data = os.read(s["m"], 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        s["buf"] += data
+    try:
+        s["p"].wait(timeout=5)
+    except Exception:
+        pass
+    s["eof"] = True
+
+
+def _pty_flush(sid):
+    s = PTY.get(sid)
+    if not s:
+        return
+    while sid in PTY:
+        time.sleep(0.12)
+        if s["buf"]:
+            data = bytes(s["buf"]); s["buf"].clear()
+            payload = {"sid": sid, "seq": s["seq"],
+                       "data": base64.b64encode(data).decode(), "closed": False}
+            s["seq"] += 1
+            ok = False
+            for _ in range(2):                      # 失败重试一次
+                try:
+                    http("/api/agent/pty_out", payload, timeout=15); ok = True; break
+                except Exception:
+                    time.sleep(1)
+            if not ok:
+                log(f"pty out dropped {sid}#{payload['seq']}")
+        if s.get("eof") and not s["buf"]:
+            break
+    try:
+        http("/api/agent/pty_out", {"sid": sid, "seq": 0, "data": "", "closed": True},
+             timeout=10)
+    except Exception:
+        pass
+    _pty_kill(sid)
+
+
+def _pty_kill(sid):
+    import signal
+    s = PTY.pop(sid, None)
+    if not s:
+        return
+    try:
+        os.killpg(os.getpgid(s["p"].pid), signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        os.close(s["m"])
+    except Exception:
+        pass
+
+
+def _pty_handle(cmd):
+    op = cmd.get("op"); sid = str(cmd.get("sid") or "")
+    if not sid:
+        return
+    if op == "pty_open":
+        if sid not in PTY:
+            _pty_open(cmd.get("cmd") or "bash -li", sid,
+                      cmd.get("cols") or 120, cmd.get("rows") or 32)
+    elif op == "pty_in":
+        s = PTY.get(sid)
+        if s:
+            try:
+                data = base64.b64decode(cmd.get("data") or "")
+                if data:
+                    os.write(s["m"], data)
+            except OSError:
+                pass
+    elif op == "pty_win":
+        s = PTY.get(sid)
+        if s:
+            try:
+                import fcntl, signal, struct, termios
+                fcntl.ioctl(s["m"], termios.TIOCSWINSZ, struct.pack(
+                    "HHHH", int(cmd.get("rows") or 32), int(cmd.get("cols") or 120), 0, 0))
+                os.kill(s["p"].pid, signal.SIGWINCH)
+            except Exception:
+                pass
+    elif op == "pty_close":
+        _pty_kill(sid)
+
+
 def _do_exec(cmd):
     cid = cmd.get("id","?")
     script = cmd.get("script","")
@@ -274,10 +459,16 @@ def main():
     os.chmod(CONF, 0o600)
     log(f"started, panel={API}")
     fail = 0
+    _last_rep: dict = {}
     while True:
         try:
-            rep = full_report()
+            fast = bool(PTY)                       # 有终端会话时加速轮询(输入低延迟)
+            if fast and _last_rep:
+                rep = dict(_last_rep); rep["type"] = "poll"
+            else:
+                rep = full_report(); _last_rep = dict(rep)
             rep["pending"] = list(_running.keys())
+            rep["pty"] = list(PTY.keys())
             # 上报 + 取命令（一次往返）
             data = http("/api/agent/poll", rep, timeout=12)
             fail = 0
@@ -287,15 +478,38 @@ def main():
                     t = threading.Thread(target=_do_exec, args=(cmd,), daemon=True)
                     _running[cid] = t
                     t.start()
+                elif op in ("pty_open", "pty_in", "pty_win", "pty_close"):
+                    try:
+                        _pty_handle(cmd)
+                    except Exception as e:
+                        log(f"pty cmd err: {e}")
         except Exception as e:
             fail += 1
             if fail % 10 == 1: log(f"offline: {e}; retrying...")
             time.sleep(min(2+fail, 10))
             continue
-        time.sleep(3)
+        time.sleep(0.35 if PTY else 3)
 
 if __name__ == "__main__":
     main()
+'''
+
+UNINSTALL_SH = r'''#!/bin/sh
+# LXC Deck Agent/探针 一键清理脚本
+# 用法: curl -fsSL <面板地址>/api/agent/uninstall.sh | bash
+pkill -f "/opt/lxcdeck-agent/agent.py" 2>/dev/null || true
+sleep 1
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now lxcdeck-agent >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/lxcdeck-agent.service /etc/systemd/system/multi-user.target.wants/lxcdeck-agent.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+rm -rf /opt/lxcdeck-agent
+if pgrep -f "/opt/lxcdeck-agent/agent.py" >/dev/null 2>&1; then
+  echo "[WARN] 仍有残留进程，请手动执行: pkill -9 -f lxcdeck"
+else
+  echo "[OK] LXC Deck Agent/探针 已从本机彻底清除（服务已停止并删除）"
+fi
 '''
 
 INSTALL_SH = r'''#!/bin/sh

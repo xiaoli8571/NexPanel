@@ -1,0 +1,41 @@
+services:
+  lxcdeck:
+    build: .
+    image: lxcdeck:latest
+    container_name: lxcdeck-panel
+    restart: unless-stopped
+    # 只暴露到本机回环，由宿主机上的 Caddy/Nginx 反代 + TLS 对外
+    ports:
+      - "127.0.0.1:8091:8080"
+    environment:
+      # 面板对外地址(生成 Agent 安装/卸载命令用)
+      LXCP_PUBLIC_BASE: ${LXCP_PUBLIC_BASE:-https://hy.720820.xyz}
+      # 生产务必更换为随机长字符串(节点凭据加密 / 登录令牌签名密钥)
+      LXCP_SECRET: ${LXCP_SECRET:-change-me-to-a-long-random-string}
+      LXCP_DB: /data/panel.db
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/data          # SQLite 数据库持久化(升级镜像不丢数据)
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/api/meta', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ── 可选：全新服务器一键起 Caddy(自动 HTTPS) ──
+  # 已有反向代理时保持注释即可；启用前编辑 deploy/Caddyfile.sample
+  # caddy:
+  #   image: caddy:2
+  #   container_name: lxcdeck-caddy
+  #   restart: unless-stopped
+  #   network_mode: host        # 直接使用宿主网络，便于 80/443 与 ACME
+  #   volumes:
+  #     - ./deploy/Caddyfile.sample:/etc/caddy/Caddyfile:ro
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+#
+# volumes:
+#   caddy_data:
+#   caddy_config:

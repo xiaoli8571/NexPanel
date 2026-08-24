@@ -1,0 +1,14 @@
+.git
+.gitignore
+data/
+docs/
+__pycache__
+**/__pycache__
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+nohup.out
+.env
+Dockerfile
+docker-compose.yml
