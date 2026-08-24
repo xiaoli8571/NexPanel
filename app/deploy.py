@@ -230,6 +230,7 @@ def container_install_script(config_json: dict) -> str:
     cfg_b64 = base64.b64encode(json.dumps(config_json).encode()).decode()
     return r'''
 set -e
+export PATH="$PATH:/usr/sbin:/usr/bin:/sbin:/bin"
 # 架构探测：uname 缺失时从 /proc/cpuinfo 降级判断
 if command -v uname >/dev/null 2>&1; then
   ARCH=$(uname -m)
@@ -425,6 +426,8 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
             rc, out = await _exec_on_node(node, wrapper, j, 900)
         else:
             _log(j, f"[3] 在容器内安装 sing-box 并配置 {len(all_spec)} 个入站 …")
+            # 先确保容器内有基础命令（极简容器没有包管理器/rm/tar 等）
+            await _prepare_container_tools(node, cname, j)
             last_out = ""
             for wrapper in _container_wrappers(inner, cname):
                 _log(j, f"    尝试容器执行: {wrapper.split('-- ')[-1]}")
@@ -581,6 +584,37 @@ async def _sync_machine_singbox(container_id: int | None, node_id: int,
     return True
 
 
+async def _prepare_container_tools(node: dict, cname: str, j: dict):
+    """在宿主侧把静态 busybox 复制进容器 rootfs，让极简容器也有 rm/cp/mv/tar 等基础命令"""
+    script = r'''
+NAME="$1"
+ROOTFS=$(sed -n 's/^lxc.rootfs.path = dir://p' "/var/lib/lxc/$NAME/config" 2>/dev/null)
+[ -n "$ROOTFS" ] || ROOTFS="/var/lib/lxc/$NAME/rootfs"
+if ! command -v busybox >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq && apt-get install -y -qq busybox
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache busybox
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y busybox
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y busybox
+  fi
+fi
+if command -v busybox >/dev/null 2>&1; then
+  mkdir -p "$ROOTFS/usr/local/bin"
+  cp "$(command -v busybox)" "$ROOTFS/usr/local/bin/busybox"
+  chmod +x "$ROOTFS/usr/local/bin/busybox"
+  lxc-attach -n "$NAME" -- /usr/local/bin/busybox --install -s /usr/local/bin 2>/dev/null || true
+  echo "[PREPARE] busybox installed into container $NAME"
+else
+  echo "[PREPARE] host has no busybox, container may still lack basic commands"
+fi
+'''
+    await _exec_on_node(node, f"NAME={cname}; " + script, j, 180)
+
+
 def _container_wrappers(inner: str, cname: str) -> list[str]:
     """按优先级生成在容器内执行 base64 脚本的 lxc-attach 命令"""
     base = f"printf %s {inner} | base64 -d | lxc-attach -n \"{cname}\" -- "
@@ -602,6 +636,8 @@ async def _apply_singbox_config(node: dict, container: dict | None, conf: dict,
         rc, out = await _exec_on_node(node, wrapper, j, 900)
         return rc, out
     cname = (container or {}).get("name", "")
+    # 先确保容器内有基础命令（极简容器没有包管理器/rm/tar 等）
+    await _prepare_container_tools(node, cname, j)
     last_out = ""
     for wrapper in _container_wrappers(inner, cname):
         rc, out = await _exec_on_node(node, wrapper, j, 900)
