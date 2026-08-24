@@ -221,12 +221,6 @@ async def _agent_pty_ws(ws: WebSocket, node: dict, cmd: str):
             await ws.close()
 
 
-async def _deny_probe(ws: WebSocket, name: str):
-    await _ws_out(ws, f"[面板] 节点 {name} 为仅监控探针，不提供控制台能力。\r\n")
-    with suppress(Exception):
-        await ws.close()
-
-
 @app.websocket("/ws/terminal/{cid}")
 async def terminal(ws: WebSocket, cid: int, token: str = ""):
     payload = _auth_ws(token)
@@ -249,10 +243,7 @@ async def terminal(ws: WebSocket, cid: int, token: str = ""):
     if n["kind"] == "ssh":
         await _ssh_terminal(ws, n, c)
     elif n["kind"] == "agent":
-        if n.get("role") == "probe":
-            await _deny_probe(ws, n["name"])
-        else:
-            await _agent_pty_ws(ws, n,
+        await _agent_pty_ws(ws, n,
                                 f"lxc-attach -n {shlex.quote(c['name'])} 2>&1 || "
                                 f"echo '[agent] 无法进入容器（不存在或未运行）'")
     else:
@@ -275,10 +266,7 @@ async def node_terminal(ws: WebSocket, nid: int, token: str = ""):
     if n["kind"] == "ssh":
         await _ssh_terminal(ws, n, None)
     elif n["kind"] == "agent":
-        if n.get("role") == "probe":
-            await _deny_probe(ws, n["name"])
-        else:
-            await _agent_pty_ws(ws, n, "bash -li")
+        await _agent_pty_ws(ws, n, "bash -li")
     else:
         fake = {"name": n["name"], "template": "ubuntu-22.04", "cpu": 4,
                 "mem": 4096, "disk": 40, "status": "running"}

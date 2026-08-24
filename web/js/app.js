@@ -430,7 +430,7 @@ async function viewNodes(){
           <div class="actions-cell" style="margin-top:12px">
             <button class="btn sm" data-probe="${n.id}">${icon("activity",12)} 测试</button>
             ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 接入</button>`:""}
-            ${(n.kind==="ssh"||(n.kind==="agent"&&!isProbe))&&n.status==="online"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
+            ${(n.kind==="ssh"||n.kind==="agent")&&n.status==="online"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="demo"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="演示控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="agent"?`<button class="btn sm" data-uninst="${n.id}" title="生成一键清理命令">${icon("trash",12)} 卸载</button>`:""}
             <button class="btn sm danger" data-del="${n.id}" data-name="${esc(n.name)}">${icon("trash",12)} 删除</button>
@@ -1121,6 +1121,7 @@ async function viewProbes(){
               `<span class="tag" style="color:${v==null?"var(--err)":"#86efac"}">${k} ${v==null?"×":v+"ms"}</span>`).join("")}
           </div>
           <div class="actions-cell" style="margin-top:12px">
+            <button class="btn sm" data-term="${p.id}" data-name="${esc(p.hostname||p.name)}" title="探针终端">${icon("server",12)} 终端</button>
             <button class="btn sm" data-show-cmd="${p.id}">${icon("term",12)} 接入命令</button>
             <button class="btn sm" data-uninst-cmd="${p.id}" title="生成一键清理命令">${icon("trash",12)} 卸载</button>
             <button class="btn sm danger" data-del="${p.id}" data-name="${esc(p.name)}">${icon("trash",12)} 删除</button>
@@ -1129,6 +1130,7 @@ async function viewProbes(){
         <p style="font-size:15px;margin-bottom:8px">还没有探针节点</p>
         <p>有些服务器既不想装节点也不想装 LXC —— 添加「仅监控探针」即可实时查看负载与延迟</p></div>`;
       $$("#probe-grid [data-del]").forEach(b=>b.onclick=()=>deleteNode(+b.dataset.del,b.dataset.name));
+      $$("#probe-grid [data-term]").forEach(b=>b.onclick=()=>openNodeTerminal(+b.dataset.term, b.dataset.name));
       $$("#probe-grid [data-show-cmd]").forEach(async b=>{
         b.onclick=async()=>{
           const n=(await api("/nodes")).find(x=>String(x.id)===b.dataset.showCmd);
