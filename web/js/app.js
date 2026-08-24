@@ -568,6 +568,8 @@ function openNodeModal(){
     demo:"虚拟演示节点：无需真实服务器，用于体验面板全部功能。"};
   const syncUI=()=>{
     const k=kindSel.value;
+    // 必须同时移除 hidden class，否则 CSS .hidden[style*="contents"] 会强制隐藏
+    $("#ssh-only").classList.toggle("hidden", k!=="ssh");
     $("#ssh-only").style.display = k==="ssh" ? "contents" : "none";
     $("#wrap-lxc").style.display = (k==="agent"||k==="ssh") ? "" : "none";
     if(k==="probe"||k==="demo") $("#n-lxc").checked = false;
