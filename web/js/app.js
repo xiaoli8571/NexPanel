@@ -416,6 +416,7 @@ async function viewNodes(){
               `<span class="tag" style="color:${v==null?"var(--err)":"#86efac"}">${k} ${v==null?"×":v+"ms"}</span>`).join("") || '<span class="tag">延迟采集中…</span>'}</div>`
           : `<div style="font-size:12px;color:var(--muted);margin-bottom:10px" class="mono">
               ${esc(n.os_info || (n.error?n.error.slice(0,60):"—"))}</div>`}
+          ${n.public_ip?`<div class="mono" style="font-size:11.5px;color:var(--muted);margin-bottom:8px">🌐 ${esc(n.public_ip)}</div>`:""}
           ${miniBar("CPU", L.cpu_pct)}
           ${isProbe ? miniBar("内存", memP, fmtGB(L.mem_used_mb)+" / "+fmtGB(L.mem_total_mb))
                     : miniBar("内存", memP, fmtGB(L.mem_used_mb)+" / "+fmtGB(L.mem_total_mb))}
@@ -432,7 +433,7 @@ async function viewNodes(){
             <button class="btn sm" data-move="${i}" data-dir="1" title="下移">↓</button>
             <button class="btn sm" data-probe="${n.id}">${icon("activity",12)} 测试</button>
             ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 接入</button>`:""}
-            ${(n.kind==="ssh"||n.kind==="agent")&&n.status==="online"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
+            ${(n.kind==="ssh"||n.kind==="agent")&&(n.status==="online"||n.status==="nolxc")?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="demo"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="演示控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="agent"?`<button class="btn sm" data-uninst="${n.id}" title="生成一键清理命令">${icon("trash",12)} 卸载</button>`:""}
             <button class="btn sm danger" data-del="${n.id}" data-name="${esc(n.name)}">${icon("trash",12)} 删除</button>
@@ -1147,7 +1148,8 @@ async function viewProbes(){
           <div class="tpl-head">
             <span class="tpl-logo" style="background:#334155;width:38px;height:38px">${icon("activity",16)}</span>
             <div><b>${esc(p.hostname||p.name)}</b>
-              <div class="mono" style="font-size:11px;color:var(--muted)">${esc(p.os)}</div></div>
+              <div class="mono" style="font-size:11px;color:var(--muted)">${esc(p.os)}</div>
+              ${p.public_ip?`<div class="mono" style="font-size:10.5px;color:var(--muted);margin-top:2px">🌐 ${esc(p.public_ip)}</div>`:""}</div>
             <span class="badge" style="margin-left:auto"><span class="dot" style="background:${c};animation:${p.online?'pulse 1.6s infinite':'none'}"></span>${p.online?"在线":"离线"}</span>
           </div>
           ${miniBar("CPU", p.cpu_pct, (p.cpu_pct||0).toFixed(1)+"% / "+p.cores+"核")}

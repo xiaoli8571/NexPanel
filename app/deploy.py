@@ -230,7 +230,14 @@ def container_install_script(config_json: dict) -> str:
     cfg_b64 = base64.b64encode(json.dumps(config_json).encode()).decode()
     return r'''
 set -e
-ARCH=$(uname -m); case "$ARCH" in x86_64|amd64) SB_ARCH=amd64;; aarch64) SB_ARCH=arm64;; *) SB_ARCH=amd64;; esac
+# 架构探测：uname 缺失时从 /proc/cpuinfo 降级判断
+if command -v uname >/dev/null 2>&1; then
+  ARCH=$(uname -m)
+else
+  ARCH=amd64
+  if grep -qi 'aarch64\|ARM64' /proc/cpuinfo 2>/dev/null; then ARCH=aarch64; fi
+fi
+case "$ARCH" in x86_64|amd64) SB_ARCH=amd64;; aarch64|arm64) SB_ARCH=arm64;; *) SB_ARCH=amd64;; esac
 VER=1.12.8
 PKG=""
 if command -v apt-get >/dev/null 2>&1; then PKG=apt; fi
@@ -240,11 +247,15 @@ ensure_pkg() {
   command -v curl >/dev/null 2>&1 || need="$need curl"
   command -v openssl >/dev/null 2>&1 || need="$need openssl"
   command -v tar >/dev/null 2>&1 || need="$need tar"
+  command -v uname >/dev/null 2>&1 || need="$need coreutils"
+  command -v awk >/dev/null 2>&1 || need="$need gawk"
+  command -v sed >/dev/null 2>&1 || need="$need sed"
+  command -v grep >/dev/null 2>&1 || need="$need grep"
   [ -z "$need" ] && return 0
   if [ "$PKG" = apt ]; then
-    apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl openssl ca-certificates tar
+    apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl openssl ca-certificates tar coreutils gawk sed grep
   elif [ "$PKG" = apk ]; then
-    apk add --no-cache curl openssl ca-certificates tar libstdc++
+    apk add --no-cache curl openssl ca-certificates tar coreutils gawk sed grep busybox libstdc++
   fi
 }
 ensure_pkg

@@ -9,7 +9,9 @@ from . import crypto
 # 每次采集输出的轻量脚本：容器状态 + cgroup 内存/CPU + 宿主 CPU/内存/磁盘/网卡
 COLLECT_SH = r'''
 PATH="$PATH:/usr/sbin:/usr/bin:/sbin:/bin"
-command -v lxc-start >/dev/null 2>&1 || { echo "__NOLXC__"; exit 0; }
+if ! command -v lxc-start >/dev/null 2>&1; then
+  echo "__NOLXC__"
+else
 for n in $(lxc-ls -1 2>/dev/null); do
   st=$(lxc-info -sH -n "$n" 2>/dev/null); st=${st:-stopped}
   pid=$(lxc-info -pH -n "$n" 2>/dev/null)
@@ -21,11 +23,16 @@ for n in $(lxc-ls -1 2>/dev/null); do
   [ -r "$d/cpu.stat" ] && uu=$(awk '/^usage_usec/{print $2}' "$d/cpu.stat" 2>/dev/null)
   printf "CT\t%s|%s|%s|%s|%s|%s\n" "$n" "$st" "${up:-0}" "${mu:-0}" "${uu:-0}" "$ip"
 done
+fi
 grep "^cpu " /proc/stat | head -n1
 awk 'NR>2 {split($1,a,":"); gsub(/ /,"",a[1]); if(a[1]!="lo" && a[1]!=""){rx+=$2; tx+=$10}} END{printf "NET %d %d\n", rx+0, tx+0}' /proc/net/dev
 df -kP / | tail -n1 | awk '{printf "DISK %d %d\n", $2, $3}'
 awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{printf "MEM %d %d\n", t, a}' /proc/meminfo
 (. /etc/os-release 2>/dev/null; printf "OSINFO %s|%s|%s|%s\n" "${PRETTY_NAME:-Linux}" "$(uname -r)" "$(nproc 2>/dev/null || echo 1)" "$(hostname)")
+PUBIP=""
+if command -v curl >/dev/null 2>&1; then PUBIP=$(curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null); fi
+if [ -z "$PUBIP" ] && command -v wget >/dev/null 2>&1; then PUBIP=$(wget -qO- --timeout=3 https://api.ipify.org 2>/dev/null); fi
+printf "PUBIP %s\n" "$PUBIP"
 '''
 
 INSTALL_SH = r'''
@@ -133,11 +140,10 @@ def parse_collect(text: str, prev: dict, dt: float) -> dict:
     if "__NOLXC__" in text:
         entry["status"] = "nolxc"
         entry["error"] = "节点未安装 LXC（可在节点卡片一键安装）"
-        return entry
 
     ct_cpu_prev: dict = prev.setdefault("ct_cpu", {})
     ct_cpu_new: dict = {}
-    host = {"os": "Linux", "kernel": "", "cores": 4, "hostname": ""}
+    host = {"os": "Linux", "kernel": "", "cores": 4, "hostname": "", "public_ip": ""}
 
     for raw in text.splitlines():
         if raw.startswith("CT\t"):
@@ -187,11 +193,17 @@ def parse_collect(text: str, prev: dict, dt: float) -> dict:
             host = {"os": p[0] if p else "Linux",
                     "kernel": p[1] if len(p) > 1 else "",
                     "cores": int(p[2]) if len(p) > 2 and p[2].isdigit() else 4,
-                    "hostname": p[3] if len(p) > 3 else ""}
+                    "hostname": p[3] if len(p) > 3 else "",
+                    "public_ip": host.get("public_ip", "")}
+        elif raw.startswith("PUBIP "):
+            pub = raw.split(" ", 1)[1].strip() if len(raw.split(" ", 1)) > 1 else ""
+            if pub:
+                host["public_ip"] = pub
 
     prev["ct_cpu"] = ct_cpu_new
     entry["host"] = {"os": host["os"], "kernel": host["kernel"],
                      "cores": host["cores"], "hostname": host["hostname"],
+                     "public_ip": host.get("public_ip", ""),
                      "cpu_pct": entry.pop("_cpu", 0.0),
                      "mem_total_mb": entry.pop("_mtot", 0),
                      "mem_used_mb": entry.pop("_mused", 0),
