@@ -246,11 +246,11 @@ if command -v apk >/dev/null 2>&1; then PKG=apk; fi
 if [ -z "$PKG" ] && command -v dnf >/dev/null 2>&1; then PKG=dnf; fi
 if [ -z "$PKG" ] && command -v yum >/dev/null 2>&1; then PKG=yum; fi
 if [ -z "$PKG" ]; then
-  echo "[FAIL] 无法识别包管理器（需要 apk/apt/dnf/yum）"; exit 1
+  echo "[PREPARE] 容器无包管理器，依赖宿主预置的 busybox"
 fi
 ensure_pkg() {
   need=""
-  for c in rm mv cp cat printf base64 sh bash curl openssl tar uname awk sed grep head tail install sleep pidof; do
+  for c in rm mv cp cat printf base64 sh bash curl tar uname awk sed grep head tail sleep pidof; do
     command -v "$c" >/dev/null 2>&1 || need="$need $c"
   done
   [ -z "$need" ] && return 0
@@ -285,12 +285,15 @@ if [ "$NEED_DL" = "1" ]; then
   done
   [ -s /tmp/sb.tgz ] || { echo "[FAIL] sing-box 下载失败"; exit 1; }
   tar -C /tmp -xzf /tmp/sb.tgz
-  install -m755 "/tmp/sing-box-${VER}-linux-${SB_ARCH}/sing-box" /usr/local/bin/sing-box
+  cp "/tmp/sing-box-${VER}-linux-${SB_ARCH}/sing-box" /usr/local/bin/sing-box
+  chmod +x /usr/local/bin/sing-box
 fi
 mkdir -p /etc/sing-box
-[ -f /etc/sing-box/cert.pem ] || openssl req -x509 -newkey ec \
-  -pkeyopt ec_paramgen_curve:prime256v1 -keyout /etc/sing-box/key.pem \
-  -out /etc/sing-box/cert.pem -days 3650 -nodes -subj "/CN=bing.com" >/dev/null 2>&1
+if [ ! -f /etc/sing-box/cert.pem ] && command -v openssl >/dev/null 2>&1; then
+  openssl req -x509 -newkey ec \
+    -pkeyopt ec_paramgen_curve:prime256v1 -keyout /etc/sing-box/key.pem \
+    -out /etc/sing-box/cert.pem -days 3650 -nodes -subj "/CN=bing.com" >/dev/null 2>&1
+fi
 ''' + f'echo {cfg_b64!r} | base64 -d > /etc/sing-box/config.json\n' + r'''
 if command -v systemctl >/dev/null 2>&1; then
   cat > /etc/systemd/system/sing-box.service <<UNIT
@@ -585,7 +588,7 @@ async def _sync_machine_singbox(container_id: int | None, node_id: int,
 
 
 async def _prepare_container_tools(node: dict, cname: str, j: dict):
-    """在宿主侧把静态 busybox 复制进容器 rootfs，让极简容器也有 rm/cp/mv/tar 等基础命令"""
+    """在宿主侧把静态 busybox 复制进容器 rootfs，并预生成证书，让极简容器也能部署"""
     script = r'''
 NAME="$1"
 ROOTFS=$(sed -n 's/^lxc.rootfs.path = dir://p' "/var/lib/lxc/$NAME/config" 2>/dev/null)
@@ -593,13 +596,13 @@ ROOTFS=$(sed -n 's/^lxc.rootfs.path = dir://p' "/var/lib/lxc/$NAME/config" 2>/de
 if ! command -v busybox >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -y -qq busybox
+    apt-get update -qq && apt-get install -y -qq busybox-static
   elif command -v apk >/dev/null 2>&1; then
     apk add --no-cache busybox
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y busybox
+    dnf install -y busybox-static
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y busybox
+    yum install -y busybox-static
   fi
 fi
 if command -v busybox >/dev/null 2>&1; then
@@ -610,6 +613,19 @@ if command -v busybox >/dev/null 2>&1; then
   echo "[PREPARE] busybox installed into container $NAME"
 else
   echo "[PREPARE] host has no busybox, container may still lack basic commands"
+fi
+# 在宿主生成自签证书并放入容器，避免容器内缺少 openssl
+if command -v openssl >/dev/null 2>&1; then
+  mkdir -p "$ROOTFS/etc/sing-box"
+  if [ ! -f "$ROOTFS/etc/sing-box/cert.pem" ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+      -keyout "$ROOTFS/etc/sing-box/key.pem" -out "$ROOTFS/etc/sing-box/cert.pem" \
+      -days 3650 -nodes -subj "/CN=bing.com" >/dev/null 2>&1 || true
+    chmod 600 "$ROOTFS/etc/sing-box/key.pem"
+    echo "[PREPARE] cert generated into container $NAME"
+  fi
+else
+  echo "[PREPARE] host has no openssl, cert may be missing"
 fi
 '''
     await _exec_on_node(node, f"NAME={cname}; " + script, j, 180)
