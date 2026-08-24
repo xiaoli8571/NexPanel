@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LXC Deck · 轻量 LXC 管理面板</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 12l4 4-4 4M15 20h8' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- ═══════════ 登录页 ═══════════ -->
+<div id="login" class="login-wrap hidden">
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="logo">▣</div>
+      <div>
+        <h1>LXC Deck</h1>
+        <p>轻量级 LXC 容器管理面板</p>
+      </div>
+    </div>
+    <form id="login-form">
+      <label>用户名
+        <input id="login-user" autocomplete="username" placeholder="admin" required>
+      </label>
+      <label>密码
+        <input id="login-pass" type="password" autocomplete="current-password"
+               placeholder="••••••••" required>
+      </label>
+      <button class="btn primary block" type="submit">登 录</button>
+      <p id="login-error" class="login-error"></p>
+    </form>
+    <div class="login-hint">
+      演示账号：<code>admin / admin123</code><span class="sep">·</span>
+      只读体验：<code>ops / ops123</code>
+    </div>
+  </div>
+  <p class="login-foot">LXC Deck v0.1.0 — FastAPI + SQLite + Vanilla JS</p>
+</div>
+
+<!-- ═══════════ 主应用 ═══════════ -->
+<div id="app" class="app hidden">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo sm">▣</span><b>LXC Deck</b></div>
+    <nav id="nav"></nav>
+    <div class="sidebar-foot">
+      <div id="mode-badge" class="mode-badge"></div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <h2 id="page-title">概览</h2>
+      <div class="topbar-right">
+        <span id="net-chip" class="chip mono hidden"></span>
+        <div class="user-chip">
+          <span id="who-avatar" class="avatar">A</span>
+          <div class="user-meta"><b id="who-name">-</b><i id="who-role">-</i></div>
+        </div>
+        <button id="btn-logout" class="btn ghost icon-only" title="退出登录">
+          <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+      </div>
+    </header>
+    <main id="content" class="content"></main>
+  </div>
+</div>
+
+<div id="modals"></div>
+<div id="toasts"></div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
