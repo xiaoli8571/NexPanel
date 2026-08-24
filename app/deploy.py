@@ -401,16 +401,16 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         if host_target:
             _log(j, f"[3] 在主机安装 sing-box 并配置 {len(all_spec)} 个入站 …")
             wrapper = f"printf %s {inner} | base64 -d | bash"
+            rc, out = await _exec_on_node(node, wrapper, j, 900)
         else:
             _log(j, f"[3] 在容器内安装 sing-box 并配置 {len(all_spec)} 个入站 …")
-            wrapper = (f'printf %s {inner} | base64 -d | '
-                       f'lxc-attach -n "{cname}" -- bash -s')
-        rc, out = await _exec_on_node(node, wrapper, j, 900)
-        if rc != 0 and "bash" in out:
-            _log(j, "    容器无 bash，改用 sh …")
-            wrapper_sh = wrapper.replace("-- bash -s", "-- sh -s")
-            # sh 不支持部分 bashism，脚本本身保持 POSIX
-            rc, out = await _exec_on_node(node, wrapper_sh, j, 900)
+            last_out = ""
+            for wrapper in _container_wrappers(inner, cname):
+                _log(j, f"    尝试容器执行: {wrapper.split('-- ')[-1]}")
+                rc, out = await _exec_on_node(node, wrapper, j, 900)
+                last_out = out
+                if rc == 0 or "[OK]" in out:
+                    break
         for ln in out.splitlines():
             if ln.strip():
                 _log(j, "    " + ln[:150])
@@ -560,6 +560,17 @@ async def _sync_machine_singbox(container_id: int | None, node_id: int,
     return True
 
 
+def _container_wrappers(inner: str, cname: str) -> list[str]:
+    """按优先级生成在容器内执行 base64 脚本的 lxc-attach 命令"""
+    base = f"printf %s {inner} | base64 -d | lxc-attach -n \"{cname}\" -- "
+    return [
+        base + "bash -s",
+        base + "sh -s",
+        base + "/bin/sh -s",
+        base + "/bin/bash -s",
+    ]
+
+
 async def _apply_singbox_config(node: dict, container: dict | None, conf: dict,
                                host_target: bool, j: dict) -> tuple[int, str]:
     """把 sing-box 配置下发到目标（主机直装 或 容器内），并重启服务"""
@@ -567,14 +578,16 @@ async def _apply_singbox_config(node: dict, container: dict | None, conf: dict,
     inner = base64.b64encode(script.encode()).decode()
     if host_target:
         wrapper = f"printf %s {inner} | base64 -d | bash"
-    else:
-        cname = (container or {}).get("name", "")
-        wrapper = f"printf %s {inner} | base64 -d | lxc-attach -n \"{cname}\" -- bash -s"
-    rc, out = await _exec_on_node(node, wrapper, j, 900)
-    if rc != 0 and "bash" in out:
-        wrapper = wrapper.replace("-- bash -s", "-- sh -s")
         rc, out = await _exec_on_node(node, wrapper, j, 900)
-    return rc, out
+        return rc, out
+    cname = (container or {}).get("name", "")
+    last_out = ""
+    for wrapper in _container_wrappers(inner, cname):
+        rc, out = await _exec_on_node(node, wrapper, j, 900)
+        last_out = out
+        if rc == 0 or "[OK]" in out:
+            return rc, out
+    return rc, last_out
 
 
 async def remove_app(app_id: int, user: dict, ip: str):
