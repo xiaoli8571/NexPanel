@@ -905,6 +905,15 @@ async function viewApps(){
   };
   $("#d-app").dispatchEvent(new Event("change"));
 
+  // 切换部署目标：容器 / VPS 主机
+  const syncDeployTarget = ()=>{
+    const isHost = $("#d-target-type").value === "host";
+    $("#wrap-container").classList.toggle("hidden", isHost);
+    $("#wrap-host").classList.toggle("hidden", !isHost);
+  };
+  $("#d-target-type").onchange = syncDeployTarget;
+  syncDeployTarget();
+
   loadApps();
   $("#btn-sub").onclick = openSubModal;
   $("#btn-deploy").onclick = async ()=>{
