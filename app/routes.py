@@ -268,6 +268,8 @@ def probe_node(nid: int, admin: dict = Depends(require_admin)):
         status = "online" if info["lxc_installed"] else "nolxc"
         db.ex("UPDATE nodes SET status=?, lxc_ok=?, os_info=? WHERE id=?",
               (status, int(info["lxc_installed"]), info["os"], nid))
+        # 对已存在的 SSH 节点也启动后台监控（修复旧节点不采集负载）
+        monitor.start_node(node)
         return info
     except Exception as e:
         db.ex("UPDATE nodes SET status='offline' WHERE id=?", (nid,))

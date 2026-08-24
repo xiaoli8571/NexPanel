@@ -1604,13 +1604,16 @@ function openTermModal(title, wsUrl, opts={}){
   const ov = openModal(`<span style="display:inline-flex;gap:8px;align-items:center">
       ${icon("term",16)} ${esc(title)}</span>`,
     `<div class="term" id="term-out" style="overflow:auto"></div>
+     <textarea id="term-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+       style="position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;outline:none;resize:none"></textarea>
      <p class="sub" style="color:var(--muted);font-size:11.5px;margin-top:8px">
        原始终端模式：支持 <code>Ctrl+C</code> / <code>Ctrl+L</code> / 方向键 / Tab 补全，
-       可直接运行 <code>top</code> 等全屏程序。点击终端区域获取焦点。</p>`,
+       可直接运行 <code>top</code> 等全屏程序。点击终端区域获取焦点（手机可唤起键盘）。</p>`,
     null, "", { wide:true, onclose: ()=>{ closeWS(); clearInterval(repaint); window.removeEventListener("keydown", keyHandler, true); } });
   ov.querySelector(".modal-foot").remove();
 
   const out = ov.querySelector("#term-out");
+  const input = ov.querySelector("#term-input");
   out.style.whiteSpace = "pre";
   out.style.fontFamily = "var(--mono)";
   out.style.fontSize = "12px";
@@ -1650,7 +1653,7 @@ function openTermModal(title, wsUrl, opts={}){
 
   function keyHandler(e){
     if(wsRef !== ws || !ov.isConnected) return;
-    if(document.activeElement !== out && !out.contains(document.activeElement)) return;
+    if(document.activeElement !== input && !out.contains(document.activeElement)) return;
     const k = e.key;
     let data = null;
     if(k === "Enter") data = "\r";
@@ -1670,19 +1673,40 @@ function openTermModal(title, wsUrl, opts={}){
       const c = k.toUpperCase().charCodeAt(0)-64;
       if(c > 0 && c < 27) data = String.fromCharCode(c);
     }
-    else if(k.length===1 && !e.ctrlKey && !e.metaKey && !e.altKey) data = k;
+    // 普通可打印字符不在这里处理，交给 input 事件（兼容手机键盘/中文输入法）
     if(data !== null){
       e.preventDefault(); e.stopPropagation();
+      input.value = "";
       sendRaw(data);
     }
   }
+
+  // 手机/触屏键盘：通过 textarea 的 input 事件发送新增字符
+  let composing = false;
+  let lastInput = "";
+  input.addEventListener("compositionstart", ()=>{ composing = true; });
+  input.addEventListener("compositionend", (e)=>{
+    composing = false;
+    const d = e.data || "";
+    if(d){ sendRaw(d); }
+    input.value = ""; lastInput = "";
+  });
+  input.addEventListener("input", ()=>{
+    if(composing) return;
+    const v = input.value;
+    const diff = v.startsWith(lastInput) ? v.slice(lastInput.length) : v;
+    if(diff) sendRaw(diff);
+    input.value = ""; lastInput = "";
+  });
+  input.addEventListener("keydown", keyHandler);
+
   window.addEventListener("keydown", keyHandler, true);
-  out.addEventListener("click", ()=>out.focus());
+  out.addEventListener("click", ()=>{ input.focus(); });
 
   const proto = location.protocol==="https:"?"wss":"ws";
   const ws = new WebSocket(`${proto}://${location.host}${wsUrl}`);
   wsRef = ws;
-  ws.onopen = ()=>{ out.focus(); doResize(); paint(); };
+  ws.onopen = ()=>{ input.focus(); doResize(); paint(); };
   ws.onmessage = ev=>{
     let m; try{ m = JSON.parse(ev.data); }catch(_){ return; }
     if(m.type === "out") term.feed(m.text);

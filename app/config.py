@@ -12,7 +12,7 @@ SECRET_KEY = os.environ.get("LXCP_SECRET", "dev-secret-change-me-in-production")
 TOKEN_TTL = int(os.environ.get("LXCP_TOKEN_TTL", str(86400 * 7)))  # 7 天
 HOST_PORT = int(os.environ.get("LXCP_PORT", "8088"))
 
-VERSION = "v0.7.6"
+VERSION = "v0.7.7"
 
 # 自动检测：宿主机存在 lxc-start 时进入真实模式，否则为演示(Mock)模式
 REAL_LXC = shutil.which("lxc-start") is not None
