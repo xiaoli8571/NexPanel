@@ -20,7 +20,7 @@
 | 🖧 节点管理 Nodes | Agent 反向连接（推荐，支持 NAT）/ SSH / 演示节点三种接入；**接入时可选择是否作为母机（自动安装 LXC）**；不装 LXC 也可直接向主机下发部署节点；支持 **Debian/Ubuntu/CentOS/Rocky/Alpine**；实时指标流；凭据 Fernet 加密存储；一键生成 Agent/探针清理卸载命令 |
 | 🔗 订阅中心 Subscription | 对标 X-UI-Server 的订阅链接：`/api/sub/{token}` 按 User-Agent 自动适配 **Base64 分享链接** 或 **Clash.Meta(mihomo) YAML**；8合1 全协议；管理员可随时重置令牌 |
 | 🖥 双控制台 Consoles | **小鸡(容器)** 与 **母机(节点本体)** 均可打开 Web 终端；SSH 直连 PTY / Agent PTY-over-Polling(快轮询低延迟) / 演示模拟；前端 MiniTerm 渲染 ANSI，支持 `top` / `vim` / `Ctrl+C` / `Tab` / 方向键 |
-| ⚡ 一键部署 Deploy | 移植 X-UI-Server：**8合1 协议矩阵**（XTLS-Reality / Hysteria2 / TUIC / Trojan / H2+Reality / gRPC+Reality / AnyTLS / Naive）与单协议下发；自动生成 Reality 密钥对 / 自签证书 / DNAT 端口映射 / 分享链接 |
+| ⚡ 一键部署 Deploy | 移植 X-UI-Server：**8合1 协议矩阵**（XTLS-Reality / Hysteria2 / TUIC / Trojan / H2+Reality / gRPC+Reality / AnyTLS / Naive）与单协议下发；自动生成 Reality 密钥对 / 自签证书 / DNAT 端口映射 / 分享链接；**按机器查看已装节点，支持删除单个节点** |
 | 📦 容器实例 Containers | 按节点创建 / 管理，内存 64MB 起步（64MB 步进）、启动 / 停止 / 重启 / 删除、真实 cgroup 指标回显 |
 | 🗂 镜像模板 Templates | Ubuntu / Debian / Alpine / Rocky / CentOS Stream / Fedora / Arch 卡片式模板库，一键从模板创建 |
 | 📸 快照备份 Snapshots | 创建 / 回滚 / 删除快照，跨实例汇总视图 |

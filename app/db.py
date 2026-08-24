@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS snapshots(
 CREATE TABLE IF NOT EXISTS apps(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   container_id INTEGER,
+  node_id INTEGER,
   name TEXT NOT NULL,
   app_type TEXT NOT NULL,
   params TEXT DEFAULT '{}',
@@ -163,6 +164,16 @@ def migrate():
         _conn.execute("DELETE FROM snapshots")
         _conn.executescript(SCHEMA)
         print("[db] migrated: legacy demo containers removed")
+    # apps 表补 node_id（主机直装或容器所在节点）
+    acols = [r[1] for r in _conn.execute("PRAGMA table_info(apps)")]
+    if acols and "node_id" not in acols:
+        _conn.execute("ALTER TABLE apps ADD COLUMN node_id INTEGER")
+        # 回填：容器部署 → 从 containers.node_id 取；主机直装 → 按 name 匹配 nodes.name
+        _conn.execute("UPDATE apps SET node_id = (SELECT c.node_id FROM containers c WHERE c.id = apps.container_id) WHERE node_id IS NULL AND container_id IS NOT NULL")
+        _conn.execute("UPDATE apps SET node_id = (SELECT n.id FROM nodes n WHERE n.name = apps.name) WHERE node_id IS NULL AND container_id IS NULL")
+        _conn.commit()
+        print("[db] apps.node_id added and backfilled")
+
     # nodes 表补 agent 相关列
     ncols = [r[1] for r in _conn.execute("PRAGMA table_info(nodes)")]
     for col, ddl in (("agent_token", "TEXT DEFAULT ''"),

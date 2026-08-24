@@ -1,4 +1,5 @@
 """REST API 路由（多节点版）"""
+import json
 import re
 import uuid as uuidlib
 
@@ -449,11 +450,48 @@ def apps_catalog(user: dict = Depends(current_user)):
 
 @router.get("/apps")
 def list_apps(user: dict = Depends(current_user)):
-    return [dict(r) for r in db.q("""
-        SELECT a.id, a.container_id, a.name, a.app_type, a.links, a.status,
-               a.created_at, c.name AS container
-        FROM apps a LEFT JOIN containers c ON c.id=a.container_id
-        ORDER BY a.id DESC""")]
+    rows = db.q("""
+        SELECT a.id, a.container_id, a.node_id, a.name, a.app_type, a.params,
+               a.links, a.dnat_rules, a.status, a.created_at,
+               c.name AS container, n.name AS node_name
+        FROM apps a
+        LEFT JOIN containers c ON c.id=a.container_id
+        LEFT JOIN nodes n ON n.id=a.node_id
+        ORDER BY a.id DESC""")
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            params = json.loads(d["params"] or "{}")
+        except Exception:
+            params = {}
+        try:
+            d["spec"] = params.get("spec") or []
+        except Exception:
+            d["spec"] = []
+        d["public_ip"] = params.get("public_ip", "")
+        try:
+            d["links"] = json.loads(d["links"] or "[]")
+        except Exception:
+            d["links"] = []
+        try:
+            d["dnat_rules"] = json.loads(d["dnat_rules"] or "[]")
+        except Exception:
+            d["dnat_rules"] = []
+        d.pop("params", None)
+        out.append(d)
+    return out
+
+
+@router.delete("/apps/{app_id}/nodes/{index}")
+async def del_single_node(app_id: int, index: int, request: Request,
+                          admin: dict = Depends(require_admin)):
+    """删除某个应用中的单个代理节点（更新 sing-box 配置并移除端口映射）"""
+    try:
+        return await deploy_mod.remove_single_node(
+            app_id, index, admin["sub"], request.client.host)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.post("/deploy")

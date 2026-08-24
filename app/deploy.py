@@ -443,9 +443,9 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         j["result"] = {"links": links, "container_ip": cip, "public_ip": pub}
 
         # 持久化
-        db.ex("""INSERT INTO apps(container_id,name,app_type,params,links,dnat_rules,status,log,created_at)
-                 VALUES(?,?,?,?,?,?,?,?,?)""",
-              (container or {}).get("id"), name_prefix, "proxy",
+        db.ex("""INSERT INTO apps(container_id,node_id,name,app_type,params,links,dnat_rules,status,log,created_at)
+                 VALUES(?,?,?,?,?,?,?,?,?,?)""",
+              (container or {}).get("id"), node["id"], name_prefix, "proxy",
               json.dumps({"spec": [{k: v for k, v in n.items()} for n in spec],
                           "public_ip": pub, "container_ip": cip}, ensure_ascii=False),
               json.dumps(links, ensure_ascii=False),
@@ -512,12 +512,29 @@ async def start_deploy(target_type: str, app_type: str, start_port: int,
     return job_id
 
 
+async def _apply_singbox_config(node: dict, container: dict | None, conf: dict,
+                               host_target: bool, j: dict) -> tuple[int, str]:
+    """把 sing-box 配置下发到目标（主机直装 或 容器内），并重启服务"""
+    script = container_install_script(conf)
+    inner = base64.b64encode(script.encode()).decode()
+    if host_target:
+        wrapper = f"printf %s {inner} | base64 -d | bash"
+    else:
+        cname = (container or {}).get("name", "")
+        wrapper = f"printf %s {inner} | base64 -d | lxc-attach -n \"{cname}\" -- bash -s"
+    rc, out = await _exec_on_node(node, wrapper, j, 900)
+    if rc != 0 and "bash" in out:
+        wrapper = wrapper.replace("-- bash -s", "-- sh -s")
+        rc, out = await _exec_on_node(node, wrapper, j, 900)
+    return rc, out
+
+
 async def remove_app(app_id: int, user: dict, ip: str):
     a = db.one("SELECT * FROM apps WHERE id=?", (app_id,))
     if not a:
         raise ValueError("应用不存在")
-    c = db.one("SELECT * FROM containers WHERE id=?", (a["container_id"],))
-    node = db.one("SELECT * FROM nodes WHERE id=?", (c["node_id"],)) if c else None
+    c = db.one("SELECT * FROM containers WHERE id=?", (a["container_id"],)) if a["container_id"] else None
+    node = db.one("SELECT * FROM nodes WHERE id=?", (a["node_id"],)) if a["node_id"] else (db.one("SELECT * FROM nodes WHERE id=?", (c["node_id"],)) if c else None)
     # 反删 DNAT
     if node and node["kind"] in ("agent", "ssh"):
         for r in json.loads(a["dnat_rules"] or "[]"):
@@ -538,3 +555,59 @@ async def remove_app(app_id: int, user: dict, ip: str):
             pass
     db.ex("DELETE FROM apps WHERE id=?", (app_id,))
     db.audit(user["sub"], "删除应用", a["name"], "", ip)
+
+
+async def remove_single_node(app_id: int, index: int, user: dict, ip: str):
+    """删除某个应用(8合1/单协议)中的单个代理节点：更新配置 → 重启 sing-box → 移除DNAT → 更新DB"""
+    a = db.one("SELECT * FROM apps WHERE id=?", (app_id,))
+    if not a:
+        raise ValueError("应用不存在")
+    try:
+        params = json.loads(a["params"] or "{}")
+        spec = params.get("spec") or []
+        links = json.loads(a["links"] or "[]")
+        dnat = json.loads(a["dnat_rules"] or "[]")
+    except Exception:
+        raise ValueError("应用数据损坏")
+    if index < 0 or index >= len(spec):
+        raise ValueError("节点不存在")
+    removed = spec.pop(index)
+    if index < len(links):
+        links.pop(index)
+    removed_dnat = [r for r in dnat if r.get("dport") == removed.get("port")]
+    dnat = [r for r in dnat if r.get("dport") != removed.get("port")]
+
+    c = db.one("SELECT * FROM containers WHERE id=?", (a["container_id"],)) if a["container_id"] else None
+    node = db.one("SELECT * FROM nodes WHERE id=?", (a["node_id"],)) if a["node_id"] else (db.one("SELECT * FROM nodes WHERE id=?", (c["node_id"],)) if c else None)
+    if node and node["kind"] in ("agent", "ssh"):
+        for r in removed_dnat:
+            proto = "-p udp" if r["proto"] == "udp" else "-p tcp"
+            script = (f"iptables -t nat -D PREROUTING {proto} --dport {r['dport']} "
+                      f"-j DNAT --to-destination {r['to']} 2>/dev/null; true")
+            try:
+                await _exec_on_node(dict(node), script, {"id":"rm","log":[],"status":"","result":None}, 30)
+            except Exception:
+                pass
+
+    if spec:
+        # 还有剩余节点：重新生成配置并重启
+        conf = build_singbox_config(spec)
+        host_target = a["container_id"] is None
+        rc, out = await _apply_singbox_config(node, c, conf, host_target,
+                                              {"id":"rm","log":[],"status":"","result":None})
+        if "[OK]" not in out:
+            raise ValueError(f"远端更新失败: {out[-200:]}")
+        params["spec"] = spec
+        db.ex("UPDATE apps SET params=?, links=?, dnat_rules=? WHERE id=?",
+              (json.dumps(params, ensure_ascii=False),
+               json.dumps(links, ensure_ascii=False),
+               json.dumps(dnat), app_id))
+        db.audit(user["sub"], "删除节点",
+                 f"{a['name']} - {removed.get('protocol')}@{removed.get('port')}", "", ip)
+        return {"ok": True, "app_deleted": False}
+
+    # 节点已删光 → 整条应用删除（含停止 sing-box）
+    await remove_app(app_id, user, ip)
+    db.audit(user["sub"], "删除节点",
+             f"{a['name']} - {removed.get('protocol')}@{removed.get('port')} (最后节点，应用已删除)", "", ip)
+    return {"ok": True, "app_deleted": True}

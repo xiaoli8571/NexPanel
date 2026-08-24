@@ -872,9 +872,13 @@ async function viewApps(){
         <p style="color:var(--muted);font-size:11.5px;margin-top:8px">共用 UUID · Reality 密钥对自动生成 · 容器模式自动 DNAT 映射</p>
       </div>
       <div class="card" style="margin-top:16px;padding:6px 12px">
-        <h4 style="padding:10px 6px 0"><span class="dot"></span>已部署应用</h4>
+        <h4 style="padding:10px 6px 0;display:flex;align-items:center;gap:8px"><span class="dot"></span>已部署节点
+          <select id="machine-filter" class="select" style="margin-left:auto;width:auto;max-width:240px">
+            <option value="all">全部机器</option>
+          </select>
+        </h4>
         <div class="table-wrap" style="margin-top:8px"><table>
-          <thead><tr><th>实例/主机</th><th>类型</th><th>状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>机器</th><th>协议</th><th>端口</th><th>状态</th><th>操作</th></tr></thead>
           <tbody id="apps-body"></tbody></table></div>
       </div>
     </div>
@@ -991,20 +995,61 @@ window.copyText = t=>{
 async function loadApps(){
   try{
     const list = await api("/apps");
-    $("#apps-body").innerHTML = list.map(a=>{
-      const n = JSON.parse(a.links||"[]").length;
-      return `<tr><td><b>${esc(a.container||a.name||(a.host_target?"主机":"(未知)"))}</b></td>
-      <td><span class="tag">${n?`${n} 节点`:"-"}</span></td>
-      <td><span class="badge ${a.status==="done"?"running":a.status==="failed"?"stopped":"frozen"}">
-        <span class="dot"></span>${a.status}</span></td>
-      <td><div class="actions-cell">
-        ${n?`<button class="btn sm" onclick='copyText(${JSON.stringify(a.links)})'>复制链接</button>`:""}
-        <button class="btn sm danger" data-del-app="${a.id}">${icon("trash",12)}</button>
-      </div></td></tr>`;
-    }).join("") || `<tr><td colspan="4" class="empty">暂无部署记录</td></tr>`;
+    const sel = $("#machine-filter");
+    // 机器列表（容器 / 主机）
+    const machines = new Map();
+    list.forEach(a=>{
+      const key = a.container_id ? `c-${a.container_id}` : `h-${a.node_id}`;
+      const name = a.container_id ? (a.container || a.name || "容器") : (a.node_name || a.name || "主机");
+      if(!machines.has(key)) machines.set(key, name);
+    });
+    if(sel){
+      const cur = sel.value;
+      sel.innerHTML = `<option value="all">全部机器</option>` +
+        [...machines.entries()].map(([k,v])=>`<option value="${k}">${esc(v)}</option>`).join("");
+      if(cur && machines.has(cur)) sel.value = cur;
+    }
+    const selected = sel ? sel.value : "all";
+
+    const rows = [];
+    list.forEach(a=>{
+      const mkey = a.container_id ? `c-${a.container_id}` : `h-${a.node_id}`;
+      if(selected !== "all" && mkey !== selected) return;
+      const machineName = a.container_id ? (a.container || a.name || "容器") : (a.node_name || a.name || "主机");
+      const isHost = !a.container_id;
+      (a.spec || []).forEach((s,i)=>{
+        const link = (a.links || [])[i] || "";
+        const proto = s.protocol || s.type || "?";
+        const port = s.port || "";
+        rows.push(`<tr>
+          <td><b>${esc(machineName)}</b>${isHost?` <span class="tag">主机</span>`:` <span class="tag">LXC</span>`}</td>
+          <td><span class="tag">${esc(proto)}</span></td>
+          <td class="mono">${port}</td>
+          <td><span class="badge running"><span class="dot"></span>运行中</span></td>
+          <td><div class="actions-cell">
+            ${link?`<button class="btn sm" onclick='copyText(${JSON.stringify(link)})'>复制</button>`:""}
+            <button class="btn sm warn" data-del-node="${a.id}" data-idx="${i}" title="删除该单个节点">${icon("trash",12)} 删除</button>
+            <button class="btn sm ghost" data-del-app="${a.id}" title="删除整组(该应用全部节点)">整组</button>
+          </div></td></tr>`);
+      });
+    });
+    $("#apps-body").innerHTML = rows.join("") || `<tr><td colspan="5" class="empty">暂无部署记录</td></tr>`;
+
+    if(sel) sel.onchange = loadApps;
+
+    $$("#apps-body [data-del-node]").forEach(b=>b.onclick=async()=>{
+      const appId = +b.dataset.delNode, idx = +b.dataset.idx;
+      if(!(await confirmModal("删除该单个代理节点？将重新生成 sing-box 配置并重启，只移除这一个节点。", true))) return;
+      try{
+        const r = await api(`/apps/${appId}/nodes/${idx}`,{method:"DELETE"});
+        toast(r.app_deleted ? "该节点是最后节点，整组已删除" : "单个节点已删除","ok");
+        loadApps();
+      }catch(e){ toast(e.message,"err"); }
+    });
+
     $$("#apps-body [data-del-app]").forEach(b=>b.onclick=async()=>{
-      if(!(await confirmModal("删除该应用？将停止 sing-box 并移除端口映射。",true))) return;
-      try{ await api(`/apps/${b.dataset.delApp}`,{method:"DELETE"}); toast("已删除","ok"); loadApps(); }
+      if(!(await confirmModal("删除整组应用？将停止 sing-box 并移除全部端口映射。",true))) return;
+      try{ await api(`/apps/${b.dataset.delApp}`,{method:"DELETE"}); toast("整组已删除","ok"); loadApps(); }
       catch(e){ toast(e.message,"err"); }
     });
   }catch(e){}
