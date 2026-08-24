@@ -196,7 +196,8 @@ def _panel_base(request: Request) -> str:
 
 
 def _install_cmd(base: str, token: str) -> str:
-    return (f"curl -fsSL {base}/api/agent/install.sh | bash -s -- "
+    # 用 sh 而非 bash：部分 Alpine/minimal 系统可能没装 bash
+    return (f"curl -fsSL {base}/api/agent/install.sh | sh -s -- "
             f"--api {base} --token {token}")
 
 

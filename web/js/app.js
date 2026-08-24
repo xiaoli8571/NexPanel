@@ -479,7 +479,7 @@ window.deleteNode = async function(id, name){
   try{ node = (await api("/nodes")).find(x=>+x.id===+id); }catch(e){}
   const isAgent = node && node.kind === "agent";
   const base = location.origin;
-  const ucmd = (node && node.uninstall_cmd) || `curl -fsSL ${base}/api/agent/uninstall.sh | bash`;
+  const ucmd = (node && node.uninstall_cmd) || `curl -fsSL ${base}/api/agent/uninstall.sh | sh`;
   const extra = isAgent ? `
     <p style="color:var(--muted);font-size:12px;line-height:1.8;margin-top:10px">
       若还要清理目标机上的 Agent/探针程序，请先在目标服务器以 root 执行：</p>
@@ -579,7 +579,7 @@ function openNodeModal(){
 function showAgentCmdModal(node){
   const base = location.origin;
   const cmd = node.install_cmd ||
-    `curl -fsSL ${base}/api/agent/install.sh | bash -s -- --api ${base} --token ${node.agent_token}`;
+    `curl -fsSL ${base}/api/agent/install.sh | sh -s -- --api ${base} --token ${node.agent_token}`;
   const ov = openModal(`⚡ 接入 <b>${esc(node.name)}</b> — 在目标 VPS 执行`, `
     <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
       SSH 登录目标 VPS，以 root 运行以下<b>一行命令</b>（需 curl）。执行完成后本节点将自动上线，
@@ -597,7 +597,7 @@ function showAgentCmdModal(node){
 /* ── Agent / 探针 一键清理命令 ── */
 window.showUninstallModal = function(node){
   const base = location.origin;
-  const cmd = node.uninstall_cmd || `curl -fsSL ${base}/api/agent/uninstall.sh | bash`;
+  const cmd = node.uninstall_cmd || `curl -fsSL ${base}/api/agent/uninstall.sh | sh`;
   const ov = openModal(`🧹 清理 Agent/探针 — <b>${esc(node.name)}</b>`, `
     <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
       SSH 登录目标服务器，以 root 运行以下<b>一行命令</b>，即可停止并彻底清除面板部署在该机器上的

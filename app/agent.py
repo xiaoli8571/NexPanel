@@ -496,7 +496,7 @@ if __name__ == "__main__":
 
 UNINSTALL_SH = r'''#!/bin/sh
 # LXC Deck Agent/探针 一键清理脚本
-# 用法: curl -fsSL <面板地址>/api/agent/uninstall.sh | bash
+# 用法: curl -fsSL <面板地址>/api/agent/uninstall.sh | sh
 pkill -f "/opt/lxcdeck-agent/agent.py" 2>/dev/null || true
 sleep 1
 if command -v systemctl >/dev/null 2>&1; then
@@ -526,25 +526,30 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$API" ] && [ -n "$TOKEN" ] || { echo "缺少 --api/--token"; exit 1; }
 
-# 安装依赖：curl + python3（按包管理器区分）
-if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+# 安装依赖：bash + curl + wget + python3 + ca-certificates（按包管理器区分）
+if ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
+   || ! command -v wget >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
   if command -v apk >/dev/null 2>&1; then
-    apk add --no-cache curl python3
+    apk add --no-cache bash curl wget python3 ca-certificates
   elif command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq curl python3
+    apt-get install -y -qq bash curl wget python3 ca-certificates
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl python3
+    dnf install -y bash curl wget python3 ca-certificates
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl python3
+    yum install -y bash curl wget python3 ca-certificates
   else
     echo "unsupported package manager"; exit 9
   fi
 fi
 
 mkdir -p /opt/lxcdeck-agent
-curl -fsSL "$API/api/agent/agent.py?token=$TOKEN" -o /opt/lxcdeck-agent/agent.py
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$API/api/agent/agent.py?token=$TOKEN" -o /opt/lxcdeck-agent/agent.py
+else
+  wget -qO /opt/lxcdeck-agent/agent.py "$API/api/agent/agent.py?token=$TOKEN"
+fi
 cat > /opt/lxcdeck-agent/agent.conf <<EOF2
 {"api":"$API","token":"$TOKEN"}
 EOF2
