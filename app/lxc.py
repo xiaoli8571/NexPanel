@@ -180,6 +180,24 @@ class DemoRuntime:
 
 
 # ════════════════════ SSH 真实节点操作 ════════════════════
+ENSURE_NET_SH = r'''
+CONFIG="/var/lib/lxc/$NAME/config"
+if ! grep -q '^lxc.net.0.type' "$CONFIG" 2>/dev/null; then
+  cat >> "$CONFIG" <<'NET'
+
+# LXC Deck default network
+lxc.net.0.type = veth
+lxc.net.0.link = lxcbr0
+lxc.net.0.flags = up
+NET
+  if lxc-info -s -n "$NAME" 2>/dev/null | grep -qi running; then
+    lxc-stop -n "$NAME" -k 2>/dev/null || true
+    lxc-start -n "$NAME" -d 2>/dev/null || true
+  fi
+fi
+'''
+
+
 class SshOps:
     """所有方法在失败时抛 RuntimeError(含远端输出尾部)"""
 
@@ -215,6 +233,8 @@ class SshOps:
         if rc:
             cls._run(node_row, f"lxc-destroy -nf {shlex.quote(c['name'])}", timeout=60)
             raise RuntimeError((out[-400:]) or "lxc-create 失败")
+        # 确保容器有默认 veth/lxcbr0 网络，避免无 IP
+        cls._run(node_row, f"NAME={shlex.quote(c['name'])}; " + ENSURE_NET_SH, timeout=120)
 
     @classmethod
     def delete(cls, node_row, c):
@@ -262,6 +282,8 @@ class AgentOps:
         if rc:
             cls._exec(node_row, f"lxc-destroy -nf {shlex.quote(c['name'])}", 60)
             raise RuntimeError(out[-400:] or "lxc-create 失败")
+        # 确保容器有默认 veth/lxcbr0 网络，避免无 IP
+        cls._exec(node_row, f"NAME={shlex.quote(c['name'])}; " + ENSURE_NET_SH, 120)
 
     @classmethod
     def delete(cls, node_row, c):
