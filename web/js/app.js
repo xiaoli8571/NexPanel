@@ -399,7 +399,10 @@ async function viewNodes(){
       const list = await api("/nodes");
       $("#node-grid").innerHTML = list.map((n,i)=>{
         const isProbe = n.role==="probe";
-        const [c,lbl] = NODE_ST[n.status]||NODE_ST.unknown;
+        // SSH 节点不要求装 LXC，nolxc 直接按“在线”显示
+        const rawSt = n.status;
+        const st = (n.kind==="ssh" && rawSt==="nolxc") ? "online" : rawSt;
+        const [c,lbl] = NODE_ST[st]||NODE_ST.unknown;
         const L=n.live, memP=L.mem_total_mb?L.mem_used_mb/L.mem_total_mb*100:0,
               diskP=L.disk_total_gb?L.disk_used_gb/L.disk_total_gb*100:0;
         return `<div class="card tpl-card">
