@@ -390,16 +390,19 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
                 raise RuntimeError(f"未获取到容器 IP: {out[-200:]}")
             _log(j, f"    容器 IP = {cip}")
 
-        # 生成 sing-box 配置并写入/启动
-        conf = build_singbox_config(spec)
+        # 生成 sing-box 配置并写入/启动（同一机器多应用合并，避免互相覆盖）
+        all_spec = _machine_app_specs(container["id"] if container else None, node["id"]) + spec
+        if len(all_spec) > len(spec):
+            _log(j, f"    合并已有 {len(all_spec)-len(spec)} 个历史节点 + 新增 {len(spec)} 个 = {len(all_spec)}")
+        conf = build_singbox_config(all_spec)
         script = container_install_script(conf)
         import base64 as b64mod
         inner = b64mod.b64encode(script.encode()).decode()
         if host_target:
-            _log(j, f"[3] 在主机安装 sing-box 并配置 {len(spec)} 个入站 …")
+            _log(j, f"[3] 在主机安装 sing-box 并配置 {len(all_spec)} 个入站 …")
             wrapper = f"printf %s {inner} | base64 -d | bash"
         else:
-            _log(j, f"[3] 在容器内安装 sing-box 并配置 {len(spec)} 个入站 …")
+            _log(j, f"[3] 在容器内安装 sing-box 并配置 {len(all_spec)} 个入站 …")
             wrapper = (f'printf %s {inner} | base64 -d | '
                        f'lxc-attach -n "{cname}" -- bash -s')
         rc, out = await _exec_on_node(node, wrapper, j, 900)
@@ -512,6 +515,51 @@ async def start_deploy(target_type: str, app_type: str, start_port: int,
     return job_id
 
 
+def _machine_app_specs(container_id: int | None, node_id: int,
+                       exclude_app_id: int | None = None) -> list[dict]:
+    """收集同一目标机器（同一 LXC 容器 或 同一主机直装）上所有已完成应用的节点 spec"""
+    if container_id is not None:
+        rows = db.q("SELECT params FROM apps WHERE status='done' AND container_id=? "
+                    "AND (? IS NULL OR id != ?) ORDER BY id",
+                    container_id, exclude_app_id, exclude_app_id)
+    else:
+        rows = db.q("SELECT params FROM apps WHERE status='done' AND container_id IS NULL "
+                    "AND node_id=? AND (? IS NULL OR id != ?) ORDER BY id",
+                    node_id, exclude_app_id, exclude_app_id)
+    specs: list[dict] = []
+    for r in rows:
+        try:
+            params = json.loads(r["params"] or "{}")
+            specs.extend(params.get("spec") or [])
+        except Exception:
+            continue
+    return specs
+
+
+async def _sync_machine_singbox(container_id: int | None, node_id: int,
+                                node: dict, container: dict | None,
+                                j: dict) -> bool:
+    """根据该机器所有已完成应用合并生成 sing-box 配置并重启；无节点则停止服务。
+    返回 True 表示已下发配置，False 表示已停止服务。"""
+    specs = _machine_app_specs(container_id, node_id)
+    if not specs:
+        # 没有剩余节点 → 停止 sing-box
+        if container and node and node["kind"] in ("agent", "ssh"):
+            try:
+                await _exec_on_node(dict(node),
+                    f'lxc-attach -n "{container["name"]}" -- systemctl disable --now sing-box; true',
+                    j, 60)
+            except Exception:
+                pass
+        return False
+    conf = build_singbox_config(specs)
+    host_target = container_id is None
+    rc, out = await _apply_singbox_config(node, container, conf, host_target, j)
+    if "[OK]" not in out:
+        raise RuntimeError(f"远端更新失败: {out[-200:]}")
+    return True
+
+
 async def _apply_singbox_config(node: dict, container: dict | None, conf: dict,
                                host_target: bool, j: dict) -> tuple[int, str]:
     """把 sing-box 配置下发到目标（主机直装 或 容器内），并重启服务"""
@@ -545,15 +593,14 @@ async def remove_app(app_id: int, user: dict, ip: str):
                 await _exec_on_node(dict(node), script, {"id":"rm","log":[],"status":"","result":None}, 30)
             except Exception:
                 pass
-    # 容器内停服务
-    if c and node:
-        try:
-            await _exec_on_node(dict(node),
-                f'lxc-attach -n "{c["name"]}" -- systemctl disable --now sing-box; true',
-                {"id":"rm","log":[],"status":"","result":None}, 60)
-        except Exception:
-            pass
     db.ex("DELETE FROM apps WHERE id=?", (app_id,))
+    # 若该机器还有其他应用，合并重建；否则停止 sing-box
+    try:
+        await _sync_machine_singbox(a["container_id"], a["node_id"], node, c,
+                                    {"id":"rm","log":[],"status":"","result":None})
+    except Exception as e:
+        db.audit(user["sub"], "删除应用", a["name"], f"远端同步失败: {e}", ip)
+        raise
     db.audit(user["sub"], "删除应用", a["name"], "", ip)
 
 
@@ -589,25 +636,32 @@ async def remove_single_node(app_id: int, index: int, user: dict, ip: str):
             except Exception:
                 pass
 
+    app_deleted = False
     if spec:
-        # 还有剩余节点：重新生成配置并重启
-        conf = build_singbox_config(spec)
-        host_target = a["container_id"] is None
-        rc, out = await _apply_singbox_config(node, c, conf, host_target,
-                                              {"id":"rm","log":[],"status":"","result":None})
-        if "[OK]" not in out:
-            raise ValueError(f"远端更新失败: {out[-200:]}")
+        # 当前应用还有剩余节点：先更新 DB，再基于整台机器所有节点重建配置
         params["spec"] = spec
         db.ex("UPDATE apps SET params=?, links=?, dnat_rules=? WHERE id=?",
               (json.dumps(params, ensure_ascii=False),
                json.dumps(links, ensure_ascii=False),
                json.dumps(dnat), app_id))
+    else:
+        # 当前应用节点已删光：删除该应用记录
+        db.ex("DELETE FROM apps WHERE id=?", (app_id,))
+        app_deleted = True
+
+    # 基于该机器剩余全部应用合并重建（或停止）
+    try:
+        await _sync_machine_singbox(a["container_id"], a["node_id"], node, c,
+                                    {"id":"rm","log":[],"status":"","result":None})
+    except Exception as e:
+        db.audit(user["sub"], "删除节点",
+                 f"{a['name']} - {removed.get('protocol')}@{removed.get('port')}", f"远端同步失败: {e}", ip)
+        raise
+
+    if app_deleted:
+        db.audit(user["sub"], "删除节点",
+                 f"{a['name']} - {removed.get('protocol')}@{removed.get('port')} (最后节点，应用已删除)", "", ip)
+    else:
         db.audit(user["sub"], "删除节点",
                  f"{a['name']} - {removed.get('protocol')}@{removed.get('port')}", "", ip)
-        return {"ok": True, "app_deleted": False}
-
-    # 节点已删光 → 整条应用删除（含停止 sing-box）
-    await remove_app(app_id, user, ip)
-    db.audit(user["sub"], "删除节点",
-             f"{a['name']} - {removed.get('protocol')}@{removed.get('port')} (最后节点，应用已删除)", "", ip)
-    return {"ok": True, "app_deleted": True}
+    return {"ok": True, "app_deleted": app_deleted}
