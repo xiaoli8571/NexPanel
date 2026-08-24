@@ -29,6 +29,7 @@ class NodeIn(BaseModel):
     username: str = "root"
     auth_type: str = Field("password", pattern="^(password|key)$")
     secret: str = ""
+    install_lxc: bool = False       # True=作为母机，接入后自动安装 LXC；False=仅部署节点
 
 
 class ContainerIn(BaseModel):
@@ -152,7 +153,7 @@ def _node_out(row) -> dict:
     s = monitor.summary_of(row)
     out = {**{k: row[k] for k in ("id", "name", "kind", "host", "port",
                                   "username", "auth_type", "created_at",
-                                  "public_ip", "role")},
+                                  "public_ip", "role", "install_lxc")},
            **s}
     if row["kind"] == "agent":
         out["agent_token"] = row["agent_token"]
@@ -214,12 +215,14 @@ def create_node(body: NodeIn, request: Request, admin: dict = Depends(require_ad
 
     secret_enc = crypto.enc(body.secret.strip()) if (body.kind == "ssh" and body.secret.strip()) else ""
     agent_token = agent_mod.new_token() if kind == "agent" else ""
-    db.ex("""INSERT INTO nodes(name,kind,role,host,port,username,auth_type,secret,agent_token,status,created_at)
-             VALUES(?,?,?,?,?,?,?,?,?,'unknown',?)""",
+    db.ex("""INSERT INTO nodes(name,kind,role,host,port,username,auth_type,secret,agent_token,status,install_lxc,created_at)
+             VALUES(?,?,?,?,?,?,?,?,?,'unknown',?,?)""",
           body.name.strip(), kind, role,
           body.host.strip() if body.kind == "ssh" else "",
           body.port, body.username.strip(), body.auth_type,
-          secret_enc, agent_token, db.now())
+          secret_enc, agent_token,
+          int(body.install_lxc) if kind in ("agent", "ssh") else 0,
+          db.now())
     row = dict(db.one("SELECT * FROM nodes WHERE name=?", (body.name.strip(),)))
     if row["kind"] == "agent":
         monitor.touch_from_db(row)
@@ -374,6 +377,20 @@ async def agent_poll(request: _Req):
         report = {}
     agent_mod.touch(nid)
     monitor.agent_report(nid, report)
+    # 如果接入时选择"作为母机"，且目标机未安装 LXC，自动下发一次安装命令（15分钟去重）
+    node = db.one("SELECT * FROM nodes WHERE id=?", (nid,))
+    if node and node["install_lxc"] and not node["lxc_ok"]:
+        import time as _time
+        import datetime as _dt
+        last = node["lxc_install_ts"] or ""
+        try:
+            last_ts = _dt.datetime.strptime(last, "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:
+            last_ts = 0
+        if _time.time() - last_ts > 900:
+            agent_mod.queue_exec(nid, nodes_mod.INSTALL_SH, timeout=900)
+            db.ex("UPDATE nodes SET lxc_install_ts=? WHERE id=?", (db.now(), nid))
+            db.audit("system", "自动安装LXC", node["name"], "agent接入后按需安装", "")
     cmds = agent_mod.pop_pending(nid)
     return {"commands": cmds}
 

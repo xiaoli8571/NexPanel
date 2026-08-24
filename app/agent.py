@@ -503,6 +503,10 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl disable --now lxcdeck-agent >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/lxcdeck-agent.service /etc/systemd/system/multi-user.target.wants/lxcdeck-agent.service
   systemctl daemon-reload >/dev/null 2>&1 || true
+elif command -v rc-service >/dev/null 2>&1; then
+  rc-service lxcdeck-agent stop >/dev/null 2>&1 || true
+  rc-update del lxcdeck-agent default >/dev/null 2>&1 || true
+  rm -f /etc/init.d/lxcdeck-agent
 fi
 rm -rf /opt/lxcdeck-agent
 if pgrep -f "/opt/lxcdeck-agent/agent.py" >/dev/null 2>&1; then
@@ -513,7 +517,7 @@ fi
 '''
 
 INSTALL_SH = r'''#!/bin/sh
-# LXC Deck Agent 一键安装脚本
+# LXC Deck Agent 一键安装脚本（支持 Debian/Ubuntu/CentOS/Rocky/Alpine）
 set -e
 API="__API__"; TOKEN="__TOKEN__"
 while [ "$#" -gt 0 ]; do
@@ -521,15 +525,34 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 [ -n "$API" ] && [ -n "$TOKEN" ] || { echo "缺少 --api/--token"; exit 1; }
-command -v curl >/dev/null || { apt-get update -qq; apt-get install -y -qq curl; }
-command -v python3 >/dev/null || apt-get install -y -qq python3
+
+# 安装依赖：curl + python3（按包管理器区分）
+if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache curl python3
+  elif command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq curl python3
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y curl python3
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y curl python3
+  else
+    echo "unsupported package manager"; exit 9
+  fi
+fi
+
 mkdir -p /opt/lxcdeck-agent
 curl -fsSL "$API/api/agent/agent.py?token=$TOKEN" -o /opt/lxcdeck-agent/agent.py
 cat > /opt/lxcdeck-agent/agent.conf <<EOF2
 {"api":"$API","token":"$TOKEN"}
 EOF2
 chmod 600 /opt/lxcdeck-agent/agent.conf
-cat > /etc/systemd/system/lxcdeck-agent.service <<EOF2
+
+if command -v systemctl >/dev/null 2>&1; then
+  # systemd 发行版（Debian/Ubuntu/CentOS/Rocky 等）
+  cat > /etc/systemd/system/lxcdeck-agent.service <<EOF2
 [Unit]
 Description=LXC Deck Agent
 After=network.target
@@ -540,8 +563,34 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF2
-systemctl daemon-reload
-systemctl enable --now lxcdeck-agent
-sleep 2
-systemctl is-active lxcdeck-agent && echo "[OK] LXC Deck Agent 已上线"
+  systemctl daemon-reload
+  systemctl enable --now lxcdeck-agent
+  sleep 2
+  systemctl is-active lxcdeck-agent && echo "[OK] LXC Deck Agent 已上线"
+elif command -v rc-service >/dev/null 2>&1; then
+  # Alpine / OpenRC
+  cat > /opt/lxcdeck-agent/run.sh <<EOF2
+#!/bin/sh
+exec /usr/bin/python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN
+EOF2
+  chmod +x /opt/lxcdeck-agent/run.sh
+  cat > /etc/init.d/lxcdeck-agent <<EOF2
+#!/sbin/openrc-run
+name="lxcdeck-agent"
+command="/bin/sh"
+command_args="/opt/lxcdeck-agent/run.sh"
+command_background=true
+pidfile="/run/lxcdeck-agent.pid"
+depend() {
+  need net
+}
+EOF2
+  chmod +x /etc/init.d/lxcdeck-agent
+  rc-update add lxcdeck-agent default >/dev/null 2>&1 || true
+  rc-service lxcdeck-agent start
+  sleep 2
+  rc-service lxcdeck-agent status >/dev/null 2>&1 && echo "[OK] LXC Deck Agent 已上线"
+else
+  echo "[WARN] 未检测到 systemd/OpenRC，请手动执行: nohup python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN &"
+fi
 '''

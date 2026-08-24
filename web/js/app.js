@@ -424,6 +424,7 @@ async function viewNodes(){
             <span class="tag">↑${fmtUp(L.uptime_s||0)}</span>
             ${!isProbe?`<span class="tag">${n.counts.total} 台实例</span>
             <span class="tag" style="color:${n.counts.running?'#86efac':'inherit'}">${n.counts.running} 运行</span>
+            ${n.install_lxc||n.lxc_ok?`<span class="tag" style="color:#a5f3fc">🖥 母机</span>`:""}
             ${n.kind==="agent"&&!n.lxc_ok&&n.status==="online"?`<button class="btn sm primary" data-install="${n.id}">⚡ 安装 LXC</button>`:""}`:""}
           </div>
           <div class="actions-cell" style="margin-top:12px">
@@ -512,6 +513,10 @@ function openNodeModal(){
           <option value="ssh">SSH 远程（免安装）</option>
           <option value="demo">演示节点</option>
         </select></label>
+      <label class="full check-line" id="wrap-lxc" style="display:none">
+        <input type="checkbox" id="n-lxc" style="accent-color:var(--accent)">
+        作为母机（接入后自动安装 LXC，用于创建/管理容器；不勾选则仅用于下发部署节点）
+      </label>
       <div id="ssh-only" class="full hidden" style="display:contents">
         <label>主机地址 / 端口 *
           <div style="display:flex;gap:8px">
@@ -532,7 +537,8 @@ function openNodeModal(){
     async ()=>{
       const kind=$("#n-kind").value;
       const role = kind==="probe" ? "probe" : "manage";
-      const body={ name:$("#n-name").value.trim(), kind, role };
+      const body={ name:$("#n-name").value.trim(), kind, role,
+        install_lxc: (kind==="agent"||kind==="ssh") && $("#n-lxc").checked };
       if(kind==="ssh"){
         Object.assign(body,{ host:$("#n-host").value.trim(), port:+$("#n-port").value||22,
           username:$("#n-user").value.trim()||"root", auth_type:$("#n-auth").value });
@@ -556,13 +562,15 @@ function openNodeModal(){
     }, "下一步");
   const kindSel=$("#n-kind"), authSel=$("#n-auth");
   const HINTS={
-    agent:"Agent 反向连接面板，支持 NAT 后的 VPS；接入后可一键安装 LXC、向容器或主机直接下发应用、实时查看负载。",
+    agent:"Agent 反向连接面板，支持 NAT 后的 VPS；不装 LXC 也能向主机直接下发部署节点，勾选“作为母机”才会自动安装 LXC。支持 Debian/Ubuntu/CentOS/Rocky/Alpine。",
     probe:"轻量探针模式：只上报 CPU/内存/磁盘/负载/网络延迟，用于纯监控场景。不提供任何管理能力。",
     ssh:"传统 SSH 方式：面板通过用户名密码/私钥远程执行命令，无需在目标机安装任何东西。",
     demo:"虚拟演示节点：无需真实服务器，用于体验面板全部功能。"};
   const syncUI=()=>{
     const k=kindSel.value;
     $("#ssh-only").style.display = k==="ssh" ? "contents" : "none";
+    $("#wrap-lxc").style.display = (k==="agent"||k==="ssh") ? "" : "none";
+    if(k==="probe"||k==="demo") $("#n-lxc").checked = false;
     $("#kind-hint").textContent = HINTS[k]||"";
   };
   kindSel.onchange=syncUI; authSel.onchange=syncUI; syncUI();

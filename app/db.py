@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS nodes(
   status TEXT DEFAULT 'unknown',
   os_info TEXT DEFAULT '',
   lxc_ok INTEGER DEFAULT 0,
+  install_lxc INTEGER DEFAULT 0,      -- 0=仅部署节点(不装LXC) 1=作为母机(自动装LXC)
+  lxc_install_ts TEXT DEFAULT '',     -- 最近一次自动安装LXC的时间戳(去重)
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS containers(
@@ -166,7 +168,9 @@ def migrate():
     for col, ddl in (("agent_token", "TEXT DEFAULT ''"),
                      ("public_ip", "TEXT DEFAULT ''"),
                      ("last_seen", "TEXT DEFAULT ''"),
-                     ("role", "TEXT DEFAULT 'manage'")):
+                     ("role", "TEXT DEFAULT 'manage'"),
+                     ("install_lxc", "INTEGER DEFAULT 0"),
+                     ("lxc_install_ts", "TEXT DEFAULT ''")):
         if ncols and col not in ncols:
             _conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {ddl}")
             print(f"[db] nodes.{col} added")
