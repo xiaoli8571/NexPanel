@@ -242,23 +242,33 @@ VER=1.12.8
 PKG=""
 if command -v apt-get >/dev/null 2>&1; then PKG=apt; fi
 if command -v apk >/dev/null 2>&1; then PKG=apk; fi
+if [ -z "$PKG" ] && command -v dnf >/dev/null 2>&1; then PKG=dnf; fi
+if [ -z "$PKG" ] && command -v yum >/dev/null 2>&1; then PKG=yum; fi
+if [ -z "$PKG" ]; then
+  echo "[FAIL] 无法识别包管理器（需要 apk/apt/dnf/yum）"; exit 1
+fi
 ensure_pkg() {
   need=""
-  command -v curl >/dev/null 2>&1 || need="$need curl"
-  command -v openssl >/dev/null 2>&1 || need="$need openssl"
-  command -v tar >/dev/null 2>&1 || need="$need tar"
-  command -v uname >/dev/null 2>&1 || need="$need coreutils"
-  command -v awk >/dev/null 2>&1 || need="$need gawk"
-  command -v sed >/dev/null 2>&1 || need="$need sed"
-  command -v grep >/dev/null 2>&1 || need="$need grep"
+  for c in rm mv cp cat printf base64 sh bash curl openssl tar uname awk sed grep head tail install sleep pidof; do
+    command -v "$c" >/dev/null 2>&1 || need="$need $c"
+  done
   [ -z "$need" ] && return 0
+  # 基础命令缺失时统一装 busybox + coreutils（rm/cp/mv/cat/printf/base64 等都在里面）
   if [ "$PKG" = apt ]; then
-    apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl openssl ca-certificates tar coreutils gawk sed grep
+    apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq busybox coreutils curl openssl ca-certificates tar gawk sed grep procps
   elif [ "$PKG" = apk ]; then
-    apk add --no-cache curl openssl ca-certificates tar coreutils gawk sed grep busybox libstdc++
+    apk add --no-cache busybox coreutils curl openssl ca-certificates tar gawk sed grep procps libstdc++
+  elif [ "$PKG" = dnf ]; then
+    dnf install -y busybox coreutils curl openssl ca-certificates tar gawk sed grep procps
+  elif [ "$PKG" = yum ]; then
+    yum install -y busybox coreutils curl openssl ca-certificates tar gawk sed grep procps
   fi
 }
 ensure_pkg
+# 确保 rm 等基础命令已可用
+for c in rm cp mv cat printf base64 sh; do
+  command -v "$c" >/dev/null 2>&1 || { echo "[FAIL] 容器缺少基础命令 $c，且安装失败"; exit 1; }
+done
 NEED_DL=1
 if [ -x /usr/local/bin/sing-box ]; then
   CUR=$(/usr/local/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
