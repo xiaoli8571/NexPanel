@@ -234,3 +234,5 @@ tbody tr:last-child td{border-bottom:none}
 .chip-btn:hover{ border-color:var(--accent); color:var(--text) }
 .chip-btn.on{ background:var(--grad); border:none; color:#fff; font-weight:600 }
 textarea.input{ padding:9px 12px }
+.lat-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.hidden[style*="contents"]{display:none!important}

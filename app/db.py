@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS nodes(
   agent_token TEXT DEFAULT '',
   public_ip TEXT DEFAULT '',
   last_seen TEXT DEFAULT '',
+  role TEXT DEFAULT 'manage',                  -- manage(全面接管) | probe(仅监控)
   status TEXT DEFAULT 'unknown',
   os_info TEXT DEFAULT '',
   lxc_ok INTEGER DEFAULT 0,
@@ -99,7 +100,7 @@ CREATE TABLE IF NOT EXISTS snapshots(
 );
 CREATE TABLE IF NOT EXISTS apps(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  container_id INTEGER NOT NULL,
+  container_id INTEGER,
   name TEXT NOT NULL,
   app_type TEXT NOT NULL,
   params TEXT DEFAULT '{}',
@@ -160,7 +161,8 @@ def migrate():
     ncols = [r[1] for r in _conn.execute("PRAGMA table_info(nodes)")]
     for col, ddl in (("agent_token", "TEXT DEFAULT ''"),
                      ("public_ip", "TEXT DEFAULT ''"),
-                     ("last_seen", "TEXT DEFAULT ''")):
+                     ("last_seen", "TEXT DEFAULT ''"),
+                     ("role", "TEXT DEFAULT 'manage'")):
         if ncols and col not in ncols:
             _conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {ddl}")
             print(f"[db] nodes.{col} added")

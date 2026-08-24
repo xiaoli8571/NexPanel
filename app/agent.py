@@ -139,7 +139,12 @@ def host_metrics():
     up = 0
     for ln in open("/proc/uptime"):
         up = int(float(ln.split()[0])); break
-    return {"cpu_pct": cpu_pct, "mem_total_mb": round(t/1024),
+    try:
+        l1, l5, l15 = os.getloadavg()
+        load = [round(l1,2), round(l5,2), round(l15,2)]
+    except Exception:
+        load = [0,0,0]
+    return {"load": load, "cpu_pct": cpu_pct, "mem_total_mb": round(t/1024),
             "mem_used_mb": round(max(t-a_kb,0)/1024),
             "disk_total_gb": round(disk_t,1), "disk_used_gb": round(disk_u,1),
             "rx_kbps": rx_k, "tx_kbps": tx_k, "uptime_s": up}
@@ -205,7 +210,8 @@ def full_report():
                                 "public_ip": pub or ""}
         _last_full = now
     rep = {"type":"report","sys":_cache_report["sys"],
-           "host":host_metrics(),"cts":containers()}
+           "host":host_metrics(),"cts":containers(),
+           "latency":latencies()}
     return rep
 
 _running: dict = {}
@@ -236,6 +242,21 @@ def _do_exec(cmd):
             log(f"result dropped {cid}: {e2}")
     finally:
         _running.pop(cid, None)
+
+
+def latencies():
+    """TCP 握手延迟探测(毫秒)：常用公共节点"""
+    import socket as s
+    out = {}
+    for name, h, p in (("Cloudflare","1.1.1.1",443), ("Google","8.8.8.8",53),
+                       ("AliDNS","223.5.5.5",53)):
+        try:
+            t0 = time.time()
+            c = s.create_connection((h,p), timeout=3); c.close()
+            out[name] = round((time.time()-t0)*1000)
+        except Exception:
+            out[name] = None
+    return out
 
 
 def main():

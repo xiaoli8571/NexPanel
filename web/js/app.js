@@ -141,6 +141,7 @@ const NAV = [
   { id:"templates", label:"镜像模板", icon:"layers",  title:"系统模板库" },
   { id:"snapshots", label:"快照备份", icon:"camera",  title:"快照与回滚" },
   { id:"network",   label:"网络拓扑", icon:"globe",   title:"网络与 IP 分配" },
+  { id:"probes",    label:"主机探针", icon:"activity",title:"探针监控" },
   { id:"users",     label:"用户管理", icon:"users",   title:"用户与权限" },
   { id:"audit",     label:"审计日志", icon:"file",    title:"操作审计日志" },
   { id:"settings",  label:"系统设置", icon:"sliders", title:"系统设置" },
@@ -159,8 +160,9 @@ function nav(){
   $$(".nav-item").forEach(el=>el.classList.toggle("active", el.dataset.id===item.id));
   $("#page-title").textContent = item.title;
   const fn = { dashboard:viewDashboard, nodes:viewNodes, containers:viewContainers,
-    apps:viewApps, templates:viewTemplates, snapshots:viewSnapshots,
-    network:viewNetwork, users:viewUsers, audit:viewAudit,
+    apps:viewApps, probes:viewProbes, templates:viewTemplates,
+    snapshots:viewSnapshots, network:viewNetwork, users:viewUsers,
+    audit:viewAudit,
     settings:viewSettings }[item.id];
   (fn || viewDashboard)();
 }
@@ -395,37 +397,43 @@ async function viewNodes(){
     try{
       const list = await api("/nodes");
       $("#node-grid").innerHTML = list.map(n=>{
+        const isProbe = n.role==="probe";
         const [c,lbl] = NODE_ST[n.status]||NODE_ST.unknown;
         const L=n.live, memP=L.mem_total_mb?L.mem_used_mb/L.mem_total_mb*100:0,
               diskP=L.disk_total_gb?L.disk_used_gb/L.disk_total_gb*100:0;
         return `<div class="card tpl-card">
           <div class="stripe" style="background:${c}"></div>
           <div class="tpl-head">
-            <span class="tpl-logo" style="background:#334155">${icon("server",17)}</span>
+            <span class="tpl-logo" style="background:#334155">${icon(isProbe?"activity":"server",17)}</span>
             <div><b>${esc(n.name)}</b>
               <div class="mono" style="font-size:11px;color:var(--muted)">
-                ${n.kind==="demo"?"🎮 演示节点":n.kind==="agent"?"⚡ Agent · "+esc(n.os_info||"等待接入"):esc(n.username+"@"+n.host+":"+n.port)}</div></div>
+                ${n.kind==="demo"?"🎮 演示节点":n.kind==="agent"?(isProbe?"📡 探针 · ":"⚡ Agent · ")+esc(n.os_info||"等待接入"):esc(n.username+"@"+n.host+":"+n.port)}</div></div>
             <span class="badge" style="margin-left:auto"><span class="dot" style="background:${c};animation:none"></span>${lbl}</span>
           </div>
-          <div style="font-size:12px;color:var(--muted);margin-bottom:10px" class="mono">
-            ${esc(n.os_info || (n.error?n.error.slice(0,60):"—"))}</div>
+          ${isProbe ? `
+            <div class="lat-row">${Object.entries(n.latency||{}).map(([k,v])=>
+              `<span class="tag" style="color:${v==null?"var(--err)":"#86efac"}">${k} ${v==null?"×":v+"ms"}</span>`).join("") || '<span class="tag">延迟采集中…</span>'}</div>`
+          : `<div style="font-size:12px;color:var(--muted);margin-bottom:10px" class="mono">
+              ${esc(n.os_info || (n.error?n.error.slice(0,60):"—"))}</div>`}
           ${miniBar("CPU", L.cpu_pct)}
-          ${miniBar("内存", memP, fmtGB(L.mem_used_mb)+" / "+fmtGB(L.mem_total_mb))}
+          ${isProbe ? miniBar("内存", memP, fmtGB(L.mem_used_mb)+" / "+fmtGB(L.mem_total_mb))
+                    : miniBar("内存", memP, fmtGB(L.mem_used_mb)+" / "+fmtGB(L.mem_total_mb))}
           ${miniBar("磁盘", diskP, L.disk_used_gb+"G / "+L.disk_total_gb+"G")}
           <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-            <span class="tag">${n.counts.total} 台实例</span>
+            <span class="tag">↑${fmtUp(L.uptime_s||0)}</span>
+            ${!isProbe?`<span class="tag">${n.counts.total} 台实例</span>
             <span class="tag" style="color:${n.counts.running?'#86efac':'inherit'}">${n.counts.running} 运行</span>
-            ${n.kind==="ssh"&&!n.lxc_ok&&n.status==="online"?`<button class="btn sm primary" data-install="${n.id}">⚡ 安装 LXC</button>`:""}
+            ${n.kind==="agent"&&!n.lxc_ok&&n.status==="online"?`<button class="btn sm primary" data-install="${n.id}">⚡ 安装 LXC</button>`:""}`:""}
           </div>
           <div class="actions-cell" style="margin-top:12px">
             <button class="btn sm" data-probe="${n.id}">${icon("activity",12)} 测试</button>
-            ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}">${icon("term",12)} 接入命令</button>`:""}
+            ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 命令</button>`:""}
             <button class="btn sm danger" data-del="${n.id}" data-name="${esc(n.name)}">${icon("trash",12)} 删除</button>
           </div>
         </div>`;
       }).join("") || `<div class="empty" style="grid-column:1/-1;padding:60px 0">
         <p style="font-size:15px;margin-bottom:8px">还没有接入任何服务器</p>
-        <p>点击右上角「接入服务器」，填入 SSH 信息即可远程创建和管理 LXC 实例</p></div>`;
+        <p>点击右上角「接入服务器」，Agent 一行命令即可接管 VPS（支持 NAT），或添加仅监控探针</p></div>`;
 
       $$("#node-grid [data-probe]").forEach(b=>b.onclick=async()=>{
         b.disabled=true; b.textContent="测试中…";
@@ -482,229 +490,87 @@ function deleteNode(id,name){
 }
 
 function openNodeModal(){
-  openModal("接入服务器（SSH）", `
+  openModal("接入服务器", `
     <div class="form-grid">
       <label>节点名称 *<input id="n-name" placeholder="如 node-shanghai"></label>
-      <label>节点类型 *
-        <select id="n-kind"><option value="ssh">SSH 服务器</option><option value="demo">演示节点（虚拟）</option></select></label>
-      <label class="full">主机地址 / 端口 *
-        <div style="display:flex;gap:8px">
-          <input id="n-host" placeholder="IP 或域名" style="flex:1">
-          <input id="n-port" type="number" value="22" min="1" max="65535" style="width:88px">
-        </div></label>
-      <label>SSH 用户名 *<input id="n-user" value="root"></label>
-      <label>认证方式 *
-        <select id="n-auth"><option value="password">密码</option><option value="key">私钥</option></select></label>
-      <label class="full" id="lbl-secret">密码 *<input id="n-secret" type="password" placeholder="SSH 登录密码"></label>
-      <label class="full hidden" id="lbl-key">私钥（PEM）*
-        <textarea id="n-keytext" rows="5" class="input mono"
-          style="resize:vertical;font-family:var(--mono);font-size:11.5px" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."></textarea></label>
-      <p class="sub full" style="color:var(--muted);font-size:12px;line-height:1.7">
-        凭据使用面板密钥加密存储；建议为面板创建专用账号并用 sudo 白名单限制 lxc 命令。<br>
-        节点需已安装 LXC（未装可在添加后一键安装）。目标系统：Debian / Ubuntu / CentOS / Rocky / Alpine。</p>
+      <label>接入方式 *
+        <select id="n-kind">
+          <option value="agent">⚡ Agent 接管（推荐·可装LXC/下发）</option>
+          <option value="probe">📡 仅监控探针（只看负载）</option>
+          <option value="ssh">SSH 远程（免安装）</option>
+          <option value="demo">演示节点</option>
+        </select></label>
+      <div id="ssh-only" class="full hidden" style="display:contents">
+        <label>主机地址 / 端口 *
+          <div style="display:flex;gap:8px">
+            <input id="n-host" placeholder="IP 或域名" style="flex:1">
+            <input id="n-port" type="number" value="22" min="1" max="65535" style="width:88px">
+          </div></label>
+        <label>SSH 用户名 *<input id="n-user" value="root"></label>
+        <label>认证方式 *
+          <select id="n-auth"><option value="password">密码</option><option value="key">私钥</option></select></label>
+        <label class="full" id="lbl-secret">密码 *<input id="n-secret" type="password"></label>
+        <label class="full hidden" id="lbl-key">私钥（PEM）*
+          <textarea id="n-keytext" rows="5" class="input mono"
+            style="resize:vertical;font-family:var(--mono);font-size:11.5px"></textarea></label>
+      </div>
+      <p class="sub full" style="color:var(--muted);font-size:12px;line-height:1.7" id="kind-hint">
+        Agent 反向连接面板，支持 NAT 后的 VPS；接入后可一键安装 LXC、下发容器/主机应用、实时查看负载。</p>
     </div>`,
     async ()=>{
       const kind=$("#n-kind").value;
-      const body={ name:$("#n-name").value.trim(), kind,
-        host:$("#n-host").value.trim(), port:+$("#n-port").value||22,
-        username:$("#n-user").value.trim()||"root",
-        auth_type:$("#n-auth").value };
+      const role = kind==="probe" ? "probe" : "manage";
+      const body={ name:$("#n-name").value.trim(), kind, role };
       if(kind==="ssh"){
+        Object.assign(body,{ host:$("#n-host").value.trim(), port:+$("#n-port").value||22,
+          username:$("#n-user").value.trim()||"root", auth_type:$("#n-auth").value });
         body.secret = body.auth_type==="key" ? $("#n-keytext").value.trim()
                                              : $("#n-secret").value;
         if(!body.host) return toast("请填写主机地址","err");
         if(!body.secret) return toast("请填写密码或私钥","err");
       }
       try{
-        // 先测试连接再保存
         if(kind==="ssh"){
           toast("正在测试连接…","info");
           await api("/nodes/test",{method:"POST",body});
         }
         const created = await api("/nodes",{method:"POST",body});
         closeModal();
-        toast(`节点 ${created.name} 已接入`,"ok");
         viewNodes();
+        if(created.agent_token){
+          showAgentCmdModal(created);           // 自动弹出安装命令
+        } else toast(`节点 ${created.name} 已添加`,"ok");
       }catch(e){ toast(String(e.message).slice(0,150),"err",4500); }
-    }, "接入");
+    }, "下一步");
   const kindSel=$("#n-kind"), authSel=$("#n-auth");
+  const HINTS={
+    agent:"Agent 反向连接面板，支持 NAT 后的 VPS；接入后可一键安装 LXC、向容器或主机直接下发应用、实时查看负载。",
+    probe:"轻量探针模式：只上报 CPU/内存/磁盘/负载/网络延迟，用于纯监控场景。不提供任何管理能力。",
+    ssh:"传统 SSH 方式：面板通过用户名密码/私钥远程执行命令，无需在目标机安装任何东西。",
+    demo:"虚拟演示节点：无需真实服务器，用于体验面板全部功能。"};
   const syncUI=()=>{
-    const isSsh = kindSel.value==="ssh";
-    ["n-host","n-port","n-user"].forEach(id=>$( "#"+id).parentElement.classList.toggle("hidden",!isSsh));
-    $("#n-user").closest("label").classList.toggle("hidden",!isSsh);
-    $("#lbl-secret").classList.toggle("hidden", !isSsh||authSel.value!=="password");
-    $("#lbl-key").classList.toggle("hidden", !isSsh||authSel.value!=="key");
+    const k=kindSel.value;
+    $("#ssh-only").style.display = k==="ssh" ? "contents" : "none";
+    $("#kind-hint").textContent = HINTS[k]||"";
   };
   kindSel.onchange=syncUI; authSel.onchange=syncUI; syncUI();
 }
 
-/* ══════════════ 视图：一键部署(X-UI 8合1 移植) ══════════════ */
-const SNI_PRESETS = ["addons.mozilla.org","www.apple.com","gateway.icloud.com",
-  "itunes.apple.com","www.microsoft.com","www.yahoo.com"];
-let deployJob = null;
-
-async function viewApps(){
-  $("#content").innerHTML = `
-  <div class="page-head">
-    <span class="sub">把代理协议栈一键下发到指定 LXC 容器（sing-box 内核 · 支持 8合1 全家桶）</span>
-  </div>
-  <div class="cols-2-1">
-    <div>
-      <div class="card">
-        <h4><span class="dot"></span>选择目标</h4>
-        <div class="form-grid">
-          <label>目标容器 *
-            <select id="d-container"><option value="">加载中…</option></select></label>
-          <label>应用模板 *
-            <select id="d-app">
-              <option value="xui-8in1">🚀 极速全量节点 (8合1)</option>
-              <option value="xtls-reality">XTLS + Reality</option>
-              <option value="hysteria2">Hysteria2 (极速)</option>
-              <option value="tuic">TUIC v5 (高并发)</option>
-              <option value="trojan">Trojan</option>
-              <option value="h2-reality">H2 + Reality</option>
-              <option value="grpc-reality">gRPC + Reality</option>
-              <option value="anytls">AnyTLS</option>
-              <option value="naive">Naive</option>
-              <option value="vless-ws">VLESS + WS</option>
-              <option value="vmess-ws">VMess + WS</option>
-              <option value="ss-2022">Shadowsocks 2022</option>
-            </select></label>
-          <label>起始端口 *<input id="d-port" type="number" value="8881" min="1024" max="65528"></label>
-          <label>SNI 伪装域名<input id="d-sni" list="sni-list" placeholder="addons.mozilla.org"></label>
-          <datalist id="sni-list">${SNI_PRESETS.map(s=>`<option value="${s}">`).join("")}</datalist>
-        </div>
-        <p class="sub" style="color:var(--muted);font-size:12px;margin-top:10px;line-height:1.7" id="d-desc"></p>
-        <button class="btn primary block" id="btn-deploy" style="margin-top:12px">${icon("zap",14)} 🚀 立即下发</button>
-      </div>
-      <div class="card" style="margin-top:16px" id="deploy-log-card">
-        <h4><span class="dot"></span>部署日志</h4>
-        <div class="term" style="height:200px" id="deploy-log">等待发起部署…</div>
-      </div>
-    </div>
-    <div>
-      <div class="card">
-        <h4><span class="dot"></span>8合1 协议矩阵</h4>
-        <table style="font-size:12.5px"><tbody>
-          ${[["XTLS-Reality",8881,"tcp"],["Hysteria2",8882,"udp"],["TUIC",8883,"udp"],["Trojan",8884,"tcp"],
-             ["H2-Reality",8885,"tcp"],["gRPC-Reality",8886,"tcp"],["AnyTLS",8887,"tcp"],["Naive",8888,"tcp"]]
-            .map(p=>`<tr><td><b>${p[0]}</b></td><td class="mono">${p[1]}<span style="color:var(--muted)">/${p[2]}</span></td></tr>`).join("")}
-        </tbody></table>
-        <p style="color:var(--muted);font-size:11.5px;margin-top:8px">共用 UUID · Reality 密钥对自动生成 · 自动 DNAT 端口映射</p>
-      </div>
-      <div class="card" style="margin-top:16px;padding:6px 12px">
-        <h4 style="padding:10px 6px 0"><span class="dot"></span>已部署应用</h4>
-        <div class="table-wrap" style="margin-top:8px"><table>
-          <thead><tr><th>实例</th><th>类型</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody id="apps-body"></tbody></table></div>
-      </div>
-    </div>
-  </div>
-  <div class="card" style="margin-top:16px" id="links-card">
-    <h4><span class="dot"></span>分享链接 <button class="btn sm ghost" id="btn-copy-all" style="margin-left:auto;display:none">📋 复制全部</button></h4>
-    <div id="links-box" style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
-      <span class="empty">尚无部署结果</span></div>
-  </div>`;
-
-  // 加载容器列表(排除 demo)
-  try{
-    const cts = await api("/containers");
-    const sel = $("#d-container");
-    const usable = cts.filter(c=>c.node_kind!=="demo");
-    sel.innerHTML = usable.map(c=>
-      `<option value="${c.id}">${esc(c.name)} · ${esc(c.node_name)} (${c.status==="running"?"运行中":"已停止"})</option>`).join("")
-      || `<option value="">暂无真实容器，请先创建</option>`;
-  }catch(e){}
-  $("#d-app").onchange = e=>{
-    const multi = e.target.value==="xui-8in1";
-    $("#d-desc").textContent = multi ?
-      "将向目标容器一次性下发 8 个防封协议（起始端口连续占用 8 个），自动生成 Reality 密钥对、自签证书并在宿主节点配置 DNAT 端口映射。"
-      : "将在目标容器内以 sing-box 内核部署该单协议，并自动完成端口映射。";
-  };
-  $("#d-app").dispatchEvent(new Event("change"));
-
-  loadApps();
-  $("#btn-deploy").onclick = async ()=>{
-    const cid = +$("#d-container").value;
-    if(!cid) return toast("请先选择目标容器","err");
-    if(!(await confirmModal(`确认向该容器下发 <b>${$("#d-app").options[$("#d-app").selectedIndex].text}</b> ？`))) return;
-    try{
-      const r = await api("/deploy",{method:"POST",body:{
-        container_id:cid, app_type:$("#d-app").value,
-        start_port:+$("#d-port").value||8881, sni:$("#d-sni").value.trim() }});
-      deployJob = r.job_id;
-      toast("部署指令已下发，日志实时滚动中…","info");
-      pollDeploy();
-    }catch(e){ toast(e.message,"err"); }
-  };
-}
-
-function pollDeploy(){
-  clearInterval(tickHandle);
-  const logBox = $("#deploy-log");
-  tickHandle = setInterval(async ()=>{
-    if(!deployJob) return;
-    try{
-      const d = await api(`/deploy/${deployJob}`);
-      logBox.textContent = d.log || "…";
-      logBox.scrollTop = logBox.scrollHeight;
-      if(d.status==="done"){
-        clearInterval(tickHandle);
-        deployJob = null;
-        renderLinks(d.result?.links||[]);
-        toast("✅ 部署完成！","ok"); loadApps();
-      } else if(d.status==="failed"){
-        clearInterval(tickHandle);
-        deployJob = null;
-        toast("部署失败，详见日志","err");
-      }
-    }catch(e){}
-  }, 1500);
-}
-
-function renderLinks(links){
-  const box = $("#links-box");
-  window._lastLinks = links;
-  if(!links.length){ box.innerHTML = '<span class="empty">尚无部署结果</span>'; return; }
-  box.innerHTML = links.map((l,i)=>`
-    <div style="display:flex;gap:8px;align-items:center;background:var(--bg-soft);
-      border:1px solid var(--line);border-radius:9px;padding:9px 12px">
-      <span class="mono" style="flex:1;font-size:11.5px;word-break:break-all;color:#a5d6ff">${esc(l)}</span>
-      <button class="btn sm" onclick="copyText(window._lastLinks[${i}])">复制</button>
-    </div>`).join("");
-  const btn = $("#btn-copy-all");
-  btn.style.display = "inline-flex";
-  btn.onclick = ()=>copyText(links.join("\n"));
-}
-
-window.copyText = t=>{
-  navigator.clipboard?.writeText(t).then(()=>toast("已复制","ok"))
-    .catch(()=>{
-      const ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta);
-      ta.select(); document.execCommand("copy"); ta.remove(); toast("已复制","ok");
-    });
-};
-
-async function loadApps(){
-  try{
-    const list = await api("/apps");
-    $("#apps-body").innerHTML = list.map(a=>{
-      const n = JSON.parse(a.links||"[]").length;
-      return `<tr><td><b>${esc(a.container||"(已删)")}</b></td>
-      <td><span class="tag">${n?`${n} 节点`:"-"}</span></td>
-      <td><span class="badge ${a.status==="done"?"running":a.status==="failed"?"stopped":"frozen"}">
-        <span class="dot"></span>${a.status}</span></td>
-      <td><div class="actions-cell">
-        ${n?`<button class="btn sm" onclick='copyText(${JSON.stringify(a.links)})'>复制链接</button>`:""}
-        <button class="btn sm danger" data-del-app="${a.id}">${icon("trash",12)}</button>
-      </div></td></tr>`;
-    }).join("") || `<tr><td colspan="4" class="empty">暂无部署记录</td></tr>`;
-    $$("#apps-body [data-del-app]").forEach(b=>b.onclick=async()=>{
-      if(!(await confirmModal("删除该应用？将停止容器内 sing-box 并移除 DNAT 映射。",true))) return;
-      try{ await api(`/apps/${b.dataset.delApp}`,{method:"DELETE"}); toast("已删除","ok"); loadApps(); }
-      catch(e){ toast(e.message,"err"); }
-    });
-  }catch(e){}
+function showAgentCmdModal(node){
+  const base = location.origin;
+  const cmd = `curl -fsSL ${base}/api/agent/install.sh | bash -s -- --api ${base} --token ${node.agent_token}`;
+  const ov = openModal(`⚡ 接入 <b>${esc(node.name)}</b> — 在目标 VPS 执行`, `
+    <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
+      SSH 登录目标 VPS，以 root 运行以下<b>一行命令</b>（需 curl）。执行完成后本节点将自动上线，
+      支持一键安装 LXC、下发应用到容器/主机、实时负载监控。</p>
+    <div class="term" style="height:auto;padding:14px;user-select:all;word-break:break-all" id="agent-cmd-box">${esc(cmd)}</div>
+    <button class="btn primary block" style="margin-top:12px" onclick="copyText(document.getElementById('agent-cmd-box').textContent)">📋 复制命令</button>
+    <p style="color:var(--muted);font-size:11.5px;margin-top:10px;line-height:1.7">
+      · Agent 每 3 秒心跳上报，Token 可随时轮换吊销<br>
+      · 支持 Debian/Ubuntu/CentOS/Rocky/Alpine 等主流系统<br>
+      · 接入后可在节点卡片「⚡ 安装 LXC」给母鸡装上 LXC 管理能力</p>`,
+    null, "", {wide:true});
+  ov.querySelector(".modal-foot").remove();
 }
 
 /* ══════════════ 视图：容器实例 ══════════════ */
@@ -902,6 +768,256 @@ function openSnapModal(cid, name){
     }, "创建快照");
 }
 window.openSnapModal = openSnapModal;
+
+/* ══════════════ 视图：一键部署(X-UI 移植) ══════════════ */
+const SNI_PRESETS = ["addons.mozilla.org","www.apple.com","gateway.icloud.com",
+  "itunes.apple.com","www.microsoft.com","www.yahoo.com"];
+let deployJob = null;
+
+async function viewApps(){
+  $("#content").innerHTML = `
+  <div class="page-head">
+    <span class="sub">把代理协议栈一键下发到指定 LXC 容器或 VPS 主机（sing-box 内核 · 支持 8合1）</span>
+  </div>
+  <div class="cols-2-1">
+    <div>
+      <div class="card">
+        <h4><span class="dot"></span>选择目标</h4>
+        <div class="form-grid">
+          <label>部署目标 *
+            <select id="d-target-type">
+              <option value="container">📦 部署到 LXC 容器</option>
+              <option value="host">🖥 部署到主机（VPS 直装）</option>
+            </select></label>
+          <label id="wrap-container">目标容器 *
+            <select id="d-container"><option value="">加载中…</option></select></label>
+          <label id="wrap-host" class="hidden">目标主机 *
+            <select id="d-host"><option value="">加载中…</option></select></label>
+          <label>应用模板 *
+            <select id="d-app">
+              <option value="xui-8in1">🚀 极速全量节点 (8合1)</option>
+              <option value="xtls-reality">XTLS + Reality</option>
+              <option value="hysteria2">Hysteria2 (极速)</option>
+              <option value="tuic">TUIC v5 (高并发)</option>
+              <option value="trojan">Trojan</option>
+              <option value="h2-reality">H2 + Reality</option>
+              <option value="grpc-reality">gRPC + Reality</option>
+              <option value="anytls">AnyTLS</option>
+              <option value="naive">Naive</option>
+              <option value="vless-ws">VLESS + WS</option>
+              <option value="vmess-ws">VMess + WS</option>
+              <option value="ss-2022">Shadowsocks 2022</option>
+            </select></label>
+          <label>起始端口 *<input id="d-port" type="number" value="8881" min="1024" max="65528"></label>
+          <label>SNI 伪装域名<input id="d-sni" list="sni-list" placeholder="addons.mozilla.org"></label>
+          <datalist id="sni-list">${SNI_PRESETS.map(s=>`<option value="${s}">`).join("")}</datalist>
+        </div>
+        <p class="sub" style="color:var(--muted);font-size:12px;margin-top:10px;line-height:1.7" id="d-desc"></p>
+        <button class="btn primary block" id="btn-deploy" style="margin-top:12px">${icon("zap",14)} 🚀 立即下发</button>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h4><span class="dot"></span>部署日志</h4>
+        <div class="term" style="height:200px;overflow-y:auto" id="deploy-log">等待发起部署…</div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h4><span class="dot"></span>8合1 协议矩阵</h4>
+        <table style="font-size:12.5px"><tbody>
+          ${[["XTLS-Reality",8881,"tcp"],["Hysteria2",8882,"udp"],["TUIC",8883,"udp"],["Trojan",8884,"tcp"],
+             ["H2-Reality",8885,"tcp"],["gRPC-Reality",8886,"tcp"],["AnyTLS",8887,"tcp"],["Naive",8888,"tcp"]]
+            .map(p=>`<tr><td><b>${p[0]}</b></td><td class="mono">${p[1]}<span style="color:var(--muted)">/${p[2]}</span></td></tr>`).join("")}
+        </tbody></table>
+        <p style="color:var(--muted);font-size:11.5px;margin-top:8px">共用 UUID · Reality 密钥对自动生成 · 容器模式自动 DNAT 映射</p>
+      </div>
+      <div class="card" style="margin-top:16px;padding:6px 12px">
+        <h4 style="padding:10px 6px 0"><span class="dot"></span>已部署应用</h4>
+        <div class="table-wrap" style="margin-top:8px"><table>
+          <thead><tr><th>实例/主机</th><th>类型</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="apps-body"></tbody></table></div>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px" id="links-card">
+    <h4><span class="dot"></span>分享链接 <button class="btn sm ghost" id="btn-copy-all" style="margin-left:auto;display:none">📋 复制全部</button></h4>
+    <div id="links-box" style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+      <span class="empty">尚无部署结果</span></div>
+  </div>`;
+
+  try{
+    const [cts, ns] = await Promise.all([api("/containers"), api("/nodes")]);
+    const usableCts = cts.filter(c=>c.node_kind!=="demo");
+    $("#d-container").innerHTML = usableCts.map(c=>
+      `<option value="${c.id}">${esc(c.name)} · ${esc(c.node_name)}</option>`).join("")
+      || `<option value="">暂无容器，请先创建</option>`;
+    const hosts = ns.filter(n=>n.role!=="probe"&&n.kind!=="demo");
+    $("#d-host").innerHTML = hosts.map(n=>
+      `<option value="${n.id}">${esc(n.name)} · ${n.kind==="agent"?"Agent":"SSH"}${n.lxc_ok?"":" ⚠未装LXC(不影响直装)"}</option>`).join("")
+      || `<option value="">暂无可用节点</option>`;
+    $("#d-host").dataset.loaded = "1";
+  }catch(e){}
+
+  const DESC = {
+    "xui-8in1":"将向目标一次性下发 8 个防封协议（起始端口连续占用 8 个），自动生成 Reality 密钥对、自签证书；容器模式还会在宿主节点配置 DNAT 端口映射。"};
+  $("#d-app").onchange = e=>{
+    $("#d-desc").textContent = DESC[e.target.value] || "将在目标以 sing-box 内核部署该单协议，并自动完成端口映射。";
+  };
+  $("#d-app").dispatchEvent(new Event("change"));
+
+  loadApps();
+  $("#btn-deploy").onclick = async ()=>{
+    const isHost = $("#d-target-type").value==="host";
+    const appLabel = $("#d-app").options[$("#d-app").selectedIndex].text;
+    const body = { app_type:$("#d-app").value,
+      start_port:+$("#d-port").value||8881, sni:$("#d-sni").value.trim(),
+      target_type: isHost ? "host" : "container" };
+    let targetName="";
+    if(isHost){
+      body.node_id = +$("#d-host").value;
+      targetName = $("#d-host")?.selectedOptions?.[0]?.textContent || "";
+      if(!body.node_id) return toast("请选择目标主机","err");
+    } else {
+      body.container_id = +$("#d-container").value;
+      targetName = $("#d-container")?.selectedOptions?.[0]?.textContent || "";
+      if(!body.container_id) return toast("请先选择目标容器","err");
+    }
+    if(!(await confirmModal(`确认下发 <b>${appLabel}</b> 到<br><b>${esc(targetName)}</b> ？`))) return;
+    try{
+      const r = await api("/deploy",{method:"POST",body});
+      deployJob = r.job_id;
+      toast("部署指令已下发，日志实时滚动中…","info");
+      pollDeploy();
+    }catch(e){ toast(e.message,"err"); }
+  };
+}
+
+function pollDeploy(){
+  clearInterval(tickHandle);
+  const logBox = $("#deploy-log");
+  tickHandle = setInterval(async ()=>{
+    if(!deployJob) return;
+    try{
+      const d = await api(`/deploy/${deployJob}`);
+      logBox.textContent = d.log || "…";
+      logBox.scrollTop = logBox.scrollHeight;
+      if(d.status==="done"){
+        clearInterval(tickHandle);
+        deployJob = null;
+        renderLinks(d.result?.links||[]);
+        toast("✅ 部署完成！","ok"); loadApps();
+      } else if(d.status==="failed"){
+        clearInterval(tickHandle);
+        deployJob = null;
+        toast("部署失败，详见日志","err");
+      }
+    }catch(e){}
+  }, 1500);
+}
+
+function renderLinks(links){
+  const box = $("#links-box");
+  window._lastLinks = links;
+  if(!links.length){ box.innerHTML = '<span class="empty">尚无部署结果</span>'; return; }
+  box.innerHTML = links.map((l,i)=>`
+    <div style="display:flex;gap:8px;align-items:center;background:var(--bg-soft);
+      border:1px solid var(--line);border-radius:9px;padding:9px 12px">
+      <span class="mono" style="flex:1;font-size:11.5px;word-break:break-all;color:#a5d6ff">${esc(l)}</span>
+      <button class="btn sm" onclick="copyText(window._lastLinks[${i}])">复制</button>
+    </div>`).join("");
+  const btn = $("#btn-copy-all");
+  btn.style.display = "inline-flex";
+  btn.onclick = ()=>copyText(links.join("\n"));
+}
+
+window.copyText = t=>{
+  navigator.clipboard?.writeText(t).then(()=>toast("已复制","ok"))
+    .catch(()=>{
+      const ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta);
+      ta.select(); document.execCommand("copy"); ta.remove(); toast("已复制","ok");
+    });
+};
+
+async function loadApps(){
+  try{
+    const list = await api("/apps");
+    $("#apps-body").innerHTML = list.map(a=>{
+      const n = JSON.parse(a.links||"[]").length;
+      return `<tr><td><b>${esc(a.container||a.name||(a.host_target?"主机":"(未知)"))}</b></td>
+      <td><span class="tag">${n?`${n} 节点`:"-"}</span></td>
+      <td><span class="badge ${a.status==="done"?"running":a.status==="failed"?"stopped":"frozen"}">
+        <span class="dot"></span>${a.status}</span></td>
+      <td><div class="actions-cell">
+        ${n?`<button class="btn sm" onclick='copyText(${JSON.stringify(a.links)})'>复制链接</button>`:""}
+        <button class="btn sm danger" data-del-app="${a.id}">${icon("trash",12)}</button>
+      </div></td></tr>`;
+    }).join("") || `<tr><td colspan="4" class="empty">暂无部署记录</td></tr>`;
+    $$("#apps-body [data-del-app]").forEach(b=>b.onclick=async()=>{
+      if(!(await confirmModal("删除该应用？将停止 sing-box 并移除端口映射。",true))) return;
+      try{ await api(`/apps/${b.dataset.delApp}`,{method:"DELETE"}); toast("已删除","ok"); loadApps(); }
+      catch(e){ toast(e.message,"err"); }
+    });
+  }catch(e){}
+}
+
+/* ══════════════ 视图：主机探针 ══════════════ */
+async function viewProbes(){
+  $("#content").innerHTML = `
+  <div class="page-head">
+    <span class="sub">轻量探针只做监控不上传任何管理能力 —— 适合纯看板的服务器</span>
+    <span class="spacer"></span>
+    <button class="btn primary" id="btn-add-probe">${icon("plus")} 添加探针</button>
+    <button class="btn ghost" id="btn-refresh-probe">${icon("rotate",13)} 刷新</button>
+  </div>
+  <div class="grid tpl-grid" id="probe-grid"><div class="empty">加载中…</div></div>`;
+
+  const render = async ()=>{
+    try{
+      const list = await api("/probes");
+      $("#probe-grid").innerHTML = list.map(p=>{
+        const [c,lbl] = NODE_ST[p.online?"online":"offline"];
+        const memP = p.mem_total_mb? p.mem_used_mb/p.mem_total_mb*100 : 0;
+        const diskP = p.disk_total_gb? p.disk_used_gb/p.disk_total_gb*100 : 0;
+        return `<div class="card tpl-card">
+          <div class="stripe" style="background:${c}"></div>
+          <div class="tpl-head">
+            <span class="tpl-logo" style="background:#334155;width:38px;height:38px">${icon("activity",16)}</span>
+            <div><b>${esc(p.hostname||p.name)}</b>
+              <div class="mono" style="font-size:11px;color:var(--muted)">${esc(p.os)}</div></div>
+            <span class="badge" style="margin-left:auto"><span class="dot" style="background:${c};animation:${p.online?'pulse 1.6s infinite':'none'}"></span>${p.online?"在线":"离线"}</span>
+          </div>
+          ${miniBar("CPU", p.cpu_pct, (p.cpu_pct||0).toFixed(1)+"% / "+p.cores+"核")}
+          ${miniBar("内存", memP, fmtGB(p.mem_used_mb)+" / "+fmtGB(p.mem_total_mb))}
+          ${miniBar("磁盘", diskP, p.disk_used_gb+"G / "+p.disk_total_gb+"G")}
+          <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
+            <span class="tag">⏱ ↑${fmtUp(p.uptime_s)}</span>
+            <span class="tag mono">↓${fmtKb(p.rx_kbps)} ↑${fmtKb(p.tx_kbps)}</span>
+            ${Object.entries(p.latency||{}).map(([k,v])=>
+              `<span class="tag" style="color:${v==null?"var(--err)":"#86efac"}">${k} ${v==null?"×":v+"ms"}</span>`).join("")}
+          </div>
+          <div class="actions-cell" style="margin-top:12px">
+            <button class="btn sm" data-show-cmd="${p.id}">${icon("term",12)} 接入命令</button>
+            <button class="btn sm danger" data-del="${p.id}" data-name="${esc(p.name)}">${icon("trash",12)} 删除</button>
+          </div></div>`;
+      }).join("") || `<div class="empty" style="grid-column:1/-1;padding:60px 0">
+        <p style="font-size:15px;margin-bottom:8px">还没有探针节点</p>
+        <p>有些服务器既不想装节点也不想装 LXC —— 添加「仅监控探针」即可实时查看负载与延迟</p></div>`;
+      $$("#probe-grid [data-del]").forEach(b=>b.onclick=()=>deleteNode(+b.dataset.del,b.dataset.name));
+      $$("#probe-grid [data-show-cmd]").forEach(async b=>{
+        b.onclick=async()=>{
+          const n=(await api("/nodes")).find(x=>String(x.id)===b.dataset.showCmd);
+          if(n) showAgentCmdModal(n);
+        };
+      });
+      $$("#probe-grid .card")[0]?.classList.add("done");
+    }catch(e){ $("#probe-grid").innerHTML=`<div class="empty">${esc(e.message)}</div>`; }
+  };
+  $("#btn-add-probe").onclick=()=>{
+    openNodeModal();
+    setTimeout(()=>{ const s=$("#n-kind"); if(s){ s.value="probe"; s.dispatchEvent(new Event("change")); } },50);
+  };
+  $("#btn-refresh-probe").onclick=render;
+  render(); tickHandle=setInterval(render,5000);
+}
 
 /* ══════════════ 视图：模板 ══════════════ */
 async function viewTemplates(){

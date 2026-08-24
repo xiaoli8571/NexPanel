@@ -74,11 +74,12 @@ def build_nodes_spec(app_type: str, start_port: int, sni: str) -> list[dict]:
         seq = [dict(CATALOG[app_type]["single"])]
     else:
         raise ValueError(f"未知应用类型 {app_type}")
+    multi = app_type == "xui-8in1"
     nodes = []
-    for item in seq:
+    for i, item in enumerate(seq):
         n = {"id": f"n{secrets.token_hex(4)}",
              "protocol": item["protocol"],
-             "port": start_port + item.get("offset", 0),
+             "port": start_port + (item.get("offset", 0) if multi else 0),
              "uuid": common_uuid,
              "sni": item.get("sni") or sni,
              "network": item.get("net", "tcp")}
@@ -357,46 +358,50 @@ async def _exec_on_node(node: dict, script_b64_content: str, j, timeout=600) -> 
         raise RuntimeError(f"节点类型 {kind} 不支持部署")
 
 
-async def run_deploy(job_id: str, container: dict, node: dict,
-                     spec: list[dict], sni: str, name_prefix: str):
+async def run_deploy(job_id: str, container: dict | None, node: dict,
+                     spec: list[dict], sni: str, name_prefix: str,
+                     host_target: bool = False):
     j = JOBS[job_id]
-    cname = container["name"]
+    cname = (container or {}).get("name", "")
+    cip = ""
+    dnat_rules = []
     try:
         j["status"] = "running"
-        # 0) 容器必须在运行
-        row = db.one("SELECT status FROM containers WHERE id=?", (container["id"],))
-        if row and row["status"] != "running":
-            _log(j, f"[1] 启动容器 {cname} …")
-            from .lxc import ops_for
-            ops = ops_for(node)
-            if node["kind"] == "demo":
-                ops.start(c)
-            else:
-                ops.start(node, c)
-            db.ex("UPDATE containers SET status='running' WHERE id=?", (container["id"],))
-            await asyncio.sleep(3)
+        if host_target:
+            _log(j, f"[1] 目标模式：主机直装（{node['name']}）— 端口直接绑定宿主")
+        else:
+            row = db.one("SELECT status FROM containers WHERE id=?", (container["id"],))
+            if row and row["status"] != "running":
+                _log(j, f"[1] 启动容器 {cname} …")
+                from .lxc import ops_for
+                ops = ops_for(node)
+                if node["kind"] == "demo":
+                    ops.start(container)
+                else:
+                    ops.start(node, container)
+                db.ex("UPDATE containers SET status='running' WHERE id=?", (container["id"],))
+                await asyncio.sleep(3)
 
-        # 1) 取容器 IP
-        _log(j, "[2] 获取容器 IP …")
-        getip = f'lxc-info -iH -n "{cname}"'
-        rc, out = await _exec_on_node(node, getip, j, 60)
-        cip = out.strip().splitlines()[0] if out.strip() else ""
-        if not cip:
-            raise RuntimeError(f"未获取到容器 IP: {out[-200:]}")
-        _log(j, f"    容器 IP = {cip}")
+            # 获取容器 IP
+            getip = f'lxc-info -iH -n "{cname}"'
+            rc, out = await _exec_on_node(node, getip, j, 60)
+            cip = out.strip().splitlines()[0] if out.strip() else ""
+            if not cip:
+                raise RuntimeError(f"未获取到容器 IP: {out[-200:]}")
+            _log(j, f"    容器 IP = {cip}")
 
-        # 2) 生成 sing-box 配置并写入/启动
+        # 生成 sing-box 配置并写入/启动
         conf = build_singbox_config(spec)
         script = container_install_script(conf)
-        _log(j, f"[3] 在容器内安装 sing-box 并配置 {len(spec)} 个入站 …")
-        rc, out = await _exec_on_node(
-            node, f'lxc-attach -n "{cname}" -- bash -s',
-            j, 900) if False else (None, "")
-        # 通过 stdin 传脚本：base64 包一层避免引号地狱
         import base64 as b64mod
         inner = b64mod.b64encode(script.encode()).decode()
-        wrapper = (f'printf %s {inner} | base64 -d | '
-                   f'lxc-attach -n "{cname}" -- bash -s')
+        if host_target:
+            _log(j, f"[3] 在主机安装 sing-box 并配置 {len(spec)} 个入站 …")
+            wrapper = f"printf %s {inner} | base64 -d | bash"
+        else:
+            _log(j, f"[3] 在容器内安装 sing-box 并配置 {len(spec)} 个入站 …")
+            wrapper = (f'printf %s {inner} | base64 -d | '
+                       f'lxc-attach -n "{cname}" -- bash -s')
         rc, out = await _exec_on_node(node, wrapper, j, 900)
         if rc != 0 and "bash" in out:
             _log(j, "    容器无 bash，改用 sh …")
@@ -409,23 +414,26 @@ async def run_deploy(job_id: str, container: dict, node: dict,
         if "[OK]" not in out:
             raise RuntimeError(f"容器内部署失败(rc={rc})")
 
-        # 3) 宿主侧 DNAT 映射(容器端口对外暴露)
-        _log(j, "[4] 配置宿主端口转发(DNAT) …")
+        # 3) 宿主侧 DNAT 映射（仅容器模式需要）
         dnat_rules = []
-        for n in spec:
-            proto_flag = "-p udp" if n["protocol"] in ("Hysteria2", "TUIC") else "-p tcp"
-            dport = n["port"]
-            rules = [
-                f"iptables -t nat -A PREROUTING {proto_flag} --dport {dport} "
-                f"-j DNAT --to-destination {cip}:{dport}",
-                f"iptables -t nat -A POSTROUTING {proto_flag} -d {cip} "
-                f"-p tcp -j MASQUERADE" if n["protocol"] not in ("Hysteria2", "TUIC") else "",
-            ]
-            for cmd in [r for r in rules if r]:
-                rc2, o2 = await _exec_on_node(node, cmd + " 2>/dev/null || true", j, 30)
-            dnat_rules.append({"proto": "udp" if n["protocol"] in ("Hysteria2", "TUIC") else "tcp",
-                               "dport": dport, "to": f"{cip}:{dport}"})
-        _log(j, f"    已映射 {len(dnat_rules)} 个端口 → {cip}")
+        if host_target:
+            _log(j, "[4] 主机直装无需端口映射")
+        else:
+            _log(j, "[4] 配置宿主端口转发(DNAT) …")
+            for n in spec:
+                proto_flag = "-p udp" if n["protocol"] in ("Hysteria2", "TUIC") else "-p tcp"
+                dport = n["port"]
+                rules = [
+                    f"iptables -t nat -A PREROUTING {proto_flag} --dport {dport} "
+                    f"-j DNAT --to-destination {cip}:{dport}",
+                    f"iptables -t nat -A POSTROUTING {proto_flag} -d {cip} "
+                    f"-j MASQUERADE",
+                ]
+                for cmd in [r for r in rules if r]:
+                    rc2, o2 = await _exec_on_node(node, cmd + " 2>/dev/null || true", j, 30)
+                dnat_rules.append({"proto": "udp" if n["protocol"] in ("Hysteria2", "TUIC") else "tcp",
+                                   "dport": dport, "to": f"{cip}:{dport}"})
+            _log(j, f"    已映射 {len(dnat_rules)} 个端口 → {cip}")
 
         # 4) 生成分享链接
         pub = _node_public_ip(node) or "NODE_IP"
@@ -437,7 +445,7 @@ async def run_deploy(job_id: str, container: dict, node: dict,
         # 持久化
         db.ex("""INSERT INTO apps(container_id,name,app_type,params,links,dnat_rules,status,log,created_at)
                  VALUES(?,?,?,?,?,?,?,?,?)""",
-              container["id"], name_prefix, "proxy",
+              (container or {}).get("id"), name_prefix, "proxy",
               json.dumps({"spec": [{k: v for k, v in n.items()} for n in spec]}, ensure_ascii=False),
               json.dumps(links, ensure_ascii=False),
               json.dumps(dnat_rules), "done", "".join(j["log"]), db.now())
@@ -457,26 +465,49 @@ async def run_deploy(job_id: str, container: dict, node: dict,
             pass
 
 
-async def start_deploy(container_id: int, app_type: str, start_port: int,
-                       sni: str, user: dict, ip: str) -> str:
-    row = db.one("SELECT * FROM containers WHERE id=?", (container_id,))
-    if not row:
-        raise ValueError("容器不存在")
-    container = dict(row)
-    node = db.one("SELECT * FROM nodes WHERE id=?", (container["node_id"],))
-    if not node:
-        raise ValueError("容器未关联有效节点")
+async def start_deploy(target_type: str, app_type: str, start_port: int,
+                       sni: str, user: dict, ip: str,
+                       container_id: int | None = None,
+                       node_id: int | None = None) -> str:
+    """target_type: 'container'(部署进 LXC) | 'host'(VPS 主机直装)"""
+    if target_type == "host":
+        node_row = db.one("SELECT * FROM nodes WHERE id=?", (node_id,))
+        if not node_row:
+            raise ValueError("节点不存在")
+        node = dict(node_row)
+        if node["kind"] == "demo":
+            raise ValueError("演示节点不支持部署")
+        if node["kind"] == "agent":
+            from . import agent as agent_mod
+            if not agent_mod.is_online(node["id"]):
+                raise ValueError("Agent 离线，无法下发")
+        container = None
+        name_prefix = node["name"]
+    else:
+        row = db.one("SELECT * FROM containers WHERE id=?", (container_id,))
+        if not row:
+            raise ValueError("容器不存在")
+        container = dict(row)
+        node_row = db.one("SELECT * FROM nodes WHERE id=?", (container["node_id"],))
+        if not node_row:
+            raise ValueError("容器未关联有效节点")
+        node = dict(node_row)
+        name_prefix = container["name"]
+
     if app_type != "xui-8in1" and app_type not in CATALOG:
         raise ValueError(f"未知应用 {app_type}")
 
     spec = build_nodes_spec(app_type, start_port, sni)
     job_id = "job_" + secrets.token_hex(6)
     JOBS[job_id] = {"id": job_id, "status": "pending", "log": [], "result": None}
-    name_prefix = container["name"]
-    db.audit(user["sub"], "一键部署", container["name"],
-             f"{app_type} @:{start_port}", ip)
-    asyncio.get_running_loop().create_task(
-        run_deploy(job_id, container, dict(node), spec, sni, name_prefix))
+    db.audit(user["sub"], "一键部署", name_prefix,
+             f"{app_type} @:{start_port} ({target_type})", ip)
+
+    async def _run():
+        await run_deploy(job_id, container, node, spec, sni, name_prefix,
+                         host_target=(target_type == "host"))
+
+    asyncio.get_running_loop().create_task(_run())
     return job_id
 
 

@@ -22,7 +22,8 @@ class LoginIn(BaseModel):
 
 class NodeIn(BaseModel):
     name: str = Field(min_length=2, max_length=32)
-    kind: str = Field("ssh", pattern="^(agent|ssh|demo)$")
+    kind: str = Field("ssh", pattern="^(agent|ssh|demo|probe)$")
+    role: str = Field("manage", pattern="^(manage|probe)$")
     host: str = ""
     port: int = Field(22, ge=1, le=65535)
     username: str = "root"
@@ -151,14 +152,10 @@ def _node_out(row) -> dict:
     s = monitor.summary_of(row)
     out = {**{k: row[k] for k in ("id", "name", "kind", "host", "port",
                                   "username", "auth_type", "created_at",
-                                  "public_ip")},
+                                  "public_ip", "role")},
            **s}
     if row["kind"] == "agent":
         out["agent_token"] = row["agent_token"]
-        base = config.PUBLIC_BASE or ""
-        out["install_cmd"] = (
-            f"curl -fsSL {base}/api/agent/install.sh | bash -s -- "
-            f"--api {base} --token {row['agent_token']}") if base else             f"(配置 PUBLIC_BASE 后生成) token={row['agent_token']}"
     return out
 
 
@@ -174,8 +171,27 @@ def list_nodes(user: dict = Depends(current_user)):
     return [_node_out(r) for r in db.q("SELECT * FROM nodes ORDER BY id")]
 
 
+def _panel_base(request: Request) -> str:
+    """面板对外地址：优先环境变量，其次请求 Host"""
+    if config.PUBLIC_BASE:
+        return config.PUBLIC_BASE
+    host = request.headers.get("host", "")
+    scheme = request.headers.get("x-forwarded-proto",
+             "https" if request.url.scheme == "https" else "http")
+    return f"{scheme}://{host}" if host else ""
+
+
+def _install_cmd(base: str, token: str) -> str:
+    return (f"curl -fsSL {base}/api/agent/install.sh | bash -s -- "
+            f"--api {base} --token {token}")
+
+
 @router.post("/nodes", status_code=201)
 def create_node(body: NodeIn, request: Request, admin: dict = Depends(require_admin)):
+    kind = body.kind
+    role = body.role
+    if kind == "probe":                     # 探针本质 = 只读 Agent
+        kind, role = "agent", "probe"
     if body.kind == "ssh":
         if not body.host or not body.username:
             raise HTTPException(400, "SSH 节点必须填写主机地址与用户名")
@@ -185,13 +201,20 @@ def create_node(body: NodeIn, request: Request, admin: dict = Depends(require_ad
         raise HTTPException(400, f"节点名 {body.name} 已存在")
 
     secret_enc = crypto.enc(body.secret.strip()) if (body.kind == "ssh" and body.secret.strip()) else ""
-    agent_token = agent_mod.new_token() if body.kind == "agent" else ""
-    db.ex("""INSERT INTO nodes(name,kind,host,port,username,auth_type,secret,agent_token,status,created_at)
-             VALUES(?,?,?,?,?,?,?,?,'unknown',?)""",
-          body.name.strip(), body.kind,
+    agent_token = agent_mod.new_token() if kind == "agent" else ""
+    db.ex("""INSERT INTO nodes(name,kind,role,host,port,username,auth_type,secret,agent_token,status,created_at)
+             VALUES(?,?,?,?,?,?,?,?,?,'unknown',?)""",
+          body.name.strip(), kind, role,
           body.host.strip() if body.kind == "ssh" else "",
           body.port, body.username.strip(), body.auth_type,
           secret_enc, agent_token, db.now())
+    row = dict(db.one("SELECT * FROM nodes WHERE name=?", (body.name.strip(),)))
+    if row["kind"] == "agent":
+        monitor.touch_from_db(row)
+        out = _node_out(row)
+        out["install_cmd"] = _install_cmd(_panel_base(request), row["agent_token"])
+        return out
+    return _node_out(row)
     row = dict(db.one("SELECT * FROM nodes WHERE name=?", (body.name.strip(),)))
     monitor.start_node(row)
     db.audit(admin["sub"], "添加节点", body.name.strip(),
@@ -231,17 +254,47 @@ def probe_node(nid: int, admin: dict = Depends(require_admin)):
 
 
 @router.post("/nodes/{nid}/install")
-def install_node_lxc(nid: int, request: Request, admin: dict = Depends(require_admin)):
+async def install_node_lxc(nid: int, request: Request, admin: dict = Depends(require_admin)):
+    """一键给母鸡安装 LXC —— Agent 节点走命令通道，SSH 节点走远程执行"""
+    import asyncio as _aio
     node = _get_node(nid)
-    if node["kind"] != "ssh":
+    if node["kind"] == "demo":
         raise HTTPException(400, "演示节点无需安装")
+    if node["kind"] == "agent" and not agent_mod.is_online(nid):
+        raise HTTPException(400, "Agent 离线，无法下发安装指令")
+
+    INSTALL_LXC = (
+        "export DEBIAN_FRONTEND=noninteractive\n"
+        "if command -v apt-get >/dev/null 2>&1; then apt-get update -qq; apt-get install -y -qq lxc; "
+        "elif command -v dnf >/dev/null 2>&1; then dnf install -y lxc lxc-templates; "
+        "elif command -v yum >/dev/null 2>&1; then yum install -y lxc lxc-templates; "
+        "elif command -v apk >/dev/null 2>&1; then apk add --no-cache lxc lxc-templates; "
+        "else echo unsupported; exit 9; fi\n"
+        "command -v lxc-start && lxc-start --version")
+
     try:
-        output = nodes_mod.install_lxc(node)
+        if node["kind"] == "agent":
+            cid = agent_mod.queue_exec(nid, INSTALL_LXC, timeout=900)
+            res = await _aio.to_thread(agent_mod.wait_result, cid, 950)
+            if res is None:
+                raise RuntimeError("安装超时（可稍后重试，apt 可能仍在后台进行）")
+            rc, out = res["rc"], res["out"]
+        else:
+            rc, out = await _aio.to_thread(nodes_mod.run_cmd, node, INSTALL_LXC, 900, True)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(500, str(e)[-600:])
-    db.ex("UPDATE nodes SET status='online', lxc_ok=1 WHERE id=?", (nid,))
-    db.audit(admin["sub"], "安装LXC", node["name"], "", request.client.host)
-    return {"ok": True, "output": output[-800:]}
+        raise HTTPException(500, str(e)[-500:])
+
+    tail = "\n".join(out.splitlines()[-20:])
+    ok = ("MISSING" not in out) and (rc == 0)
+    db.ex("UPDATE nodes SET status=?, lxc_ok=? WHERE id=?",
+          ("online" if ok else "nolxc", int(ok), nid))
+    db.audit(admin["sub"], "安装LXC", node["name"],
+             "成功" if ok else tail[-120:], request.client.host)
+    if not ok:
+        raise HTTPException(500, f"安装失败:\n{tail[-400:]}")
+    return {"ok": True, "output": tail[-800:]}
 
 
 @router.delete("/nodes/{nid}")
@@ -277,7 +330,7 @@ def agent_py(token: str = ""):
 
 @router.get("/agent/install.sh")
 def install_sh(request: _Req, token: str = "", api: str = ""):
-    base = api or config.PUBLIC_BASE or str(request.base.url).rstrip("/")
+    base = api or _panel_base(request)
     script = agent_mod.INSTALL_SH.replace("__API__", base).replace("__TOKEN__", token)
     return PlainTextResponse(script, media_type="text/x-shellscript")
 
@@ -329,10 +382,12 @@ def rotate_token(nid: int, admin: dict = Depends(require_admin)):
 
 # ────────────────────────── 一键部署 ──────────────────────────
 class DeployIn(BaseModel):
-    container_id: int
     app_type: str
     start_port: int = Field(8881, ge=1024, le=65528)
     sni: str = ""
+    target_type: str = Field("container", pattern="^(container|host)$")
+    container_id: int | None = None
+    node_id: int | None = None
 
 
 @router.get("/apps/catalog")
@@ -354,11 +409,16 @@ def list_apps(user: dict = Depends(current_user)):
 async def deploy(body: DeployIn, request: Request, user: dict = Depends(current_user)):
     if user["role"] != "admin":
         raise HTTPException(403, "部署需要管理员权限")
+    if body.target_type == "container" and not body.container_id:
+        raise HTTPException(400, "缺少 container_id")
+    if body.target_type == "host" and not body.node_id:
+        raise HTTPException(400, "缺少 node_id")
     try:
         job_id = await deploy_mod.start_deploy(
-            body.container_id, body.app_type,
+            body.target_type, body.app_type,
             body.start_port, body.sni.strip() or "",
-            user, request.client.host)
+            user, request.client.host,
+            container_id=body.container_id, node_id=body.node_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"job_id": job_id}
@@ -379,6 +439,38 @@ async def del_app(app_id: int, request: Request, user: dict = Depends(require_ad
     except ValueError as e:
         raise HTTPException(404, str(e))
     return {"ok": True}
+
+
+# ────────────────────────── 探针监控 ──────────────────────────
+@router.get("/probes")
+def probes(user: dict = Depends(current_user)):
+    rows = [dict(r) for r in db.q(
+        "SELECT * FROM nodes WHERE kind='agent' AND role='probe' ORDER BY id")]
+    from . import agent as agent_mod
+    out = []
+    for r in rows:
+        entry = monitor.get_cache(r["id"]) or {}
+        host = entry.get("host") or {}
+        online = agent_mod.is_online(r["id"])
+        s = monitor.summary_of(r)
+        mem_t = host.get("mem_total_mb", 0)
+        out.append({"id": r["id"], "name": r["name"], "role": "probe",
+                    "agent_token": r["agent_token"],
+                    "status": s["status"],
+                    "online": online,
+                    "os": host.get("os") or r["os_info"] or "",
+                    "hostname": host.get("hostname", ""),
+                    "public_ip": r.get("public_ip") or host.get("hostname", ""),
+                    "cpu_pct": host.get("cpu_pct", 0.0),
+                    "cores": host.get("cores", 1),
+                    "mem_total_mb": mem_t, "mem_used_mb": host.get("mem_used_mb", 0),
+                    "disk_total_gb": host.get("disk_total_gb", 0),
+                    "disk_used_gb": host.get("disk_used_gb", 0),
+                    "rx_kbps": host.get("rx_kbps", 0), "tx_kbps": host.get("tx_kbps", 0),
+                    "uptime_s": host.get("uptime_s", 0),
+                    "load": host.get("load"),
+                    "latency": entry.get("latency", {})})
+    return out
 
 
 # ────────────────────────── overview ──────────────────────────

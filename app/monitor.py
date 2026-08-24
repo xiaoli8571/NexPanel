@@ -176,9 +176,11 @@ def summary_of(node_row: dict) -> dict:
     agent_ok = agent_online(node_row["id"]) if is_agent else False
     status = ("online" if agent_ok else "offline") if is_agent else \
              entry.get("status", node_row["status"] or "unknown")
-    return {"id": node_row["id"], "name": node_row["name"], "kind": node_row["kind"],
-            "host_addr": f"{node_row['host']}:{node_row['port']}" if node_row["kind"] == "ssh" else "",
-            "username": node_row["username"],
+    nrow = dict(node_row)
+    return {"id": nrow["id"], "name": nrow["name"], "kind": nrow["kind"],
+            "role": nrow.get("role") or "manage",
+            "host_addr": f"{nrow['host']}:{nrow['port']}" if nrow["kind"] == "ssh" else "",
+            "username": nrow["username"],
             "status": status,
             "error": entry.get("error", ""),
             "os_info": host.get("os") or node_row["os_info"] or "",
@@ -207,6 +209,7 @@ def agent_report(node_id: int, report: dict):
     cts = report.get("cts") or {}
     entry = {
         "status": "online", "error": "", "updated": time.time(),
+        "latency": report.get("latency") or {},
         "cts": {n: {"state": c.get("state", "stopped"),
                     "uptime_s": c.get("uptime_s", 0),
                     "mem_used_mb": c.get("mem_used_mb", 0),
@@ -222,7 +225,9 @@ def agent_report(node_id: int, report: dict):
                  "disk_total_gb": host.get("disk_total_gb", 0),
                  "disk_used_gb": host.get("disk_used_gb", 0),
                  "rx_kbps": host.get("rx_kbps", 0),
-                 "tx_kbps": host.get("tx_kbps", 0)},
+                 "tx_kbps": host.get("tx_kbps", 0),
+                 "load": host.get("load"),
+                 "uptime_s": host.get("uptime_s", 0)},
     }
     CACHE[node_id] = entry
     try:
