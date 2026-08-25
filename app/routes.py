@@ -85,7 +85,7 @@ def require_admin(user: dict = Depends(current_user)) -> dict:
 def meta():
     n_total = db.one("SELECT COUNT(*) n FROM nodes")["n"]
     online = sum(1 for r in db.q("SELECT id FROM nodes")
-                 if (monitor.get_cache(r["id"]) or {}).get("status") == "online")
+                 if (monitor.get_cache(r["id"]) or {}).get("status") in ("online", "nolxc"))
     return {"brand": config.BRAND, "version": config.VERSION,
             "nodes_total": n_total, "nodes_online": online}
 
@@ -759,7 +759,7 @@ def overview(user: dict = Depends(current_user)):
                 "mem_total_mb": mem_t, "mem_used_mb": mem_u,
                 "disk_total_gb": round(disk_t, 1), "disk_used_gb": round(disk_u, 1),
                 "nodes_total": len(nodes_rows),
-                "nodes_online": sum(1 for s in summaries if s["status"] == "online")},
+                "nodes_online": sum(1 for s in summaries if s["status"] in ("online", "nolxc"))},
         "counts": counts,
         "nodes_summary": summaries,
         "top": sorted(top, key=lambda x: -x["cpu_pct"])[:5],
