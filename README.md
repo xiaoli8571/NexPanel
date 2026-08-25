@@ -95,7 +95,78 @@ docker compose up -d --build
 
 ---
 
+## 常用命令 / Common Commands
+
+### 宿主机 LXC 操作 / LXC commands on host
+
+```bash
+# 查看所有容器 / list all containers
+lxc-ls -f
+
+# 查看单个容器信息 / inspect a container
+lxc-info -n <container>
+lxc-info -iH -n <container>          # 只取 IP
+
+# 启动 / 停止 / 重启 / start stop restart
+lxc-start -n <container>
+lxc-stop -n <container>
+lxc-stop -r -n <container>
+
+# 进入容器 / enter a container
+lxc-attach -n <container> -- /bin/bash
+lxc-attach -n <container> -- /bin/sh
+
+# 查看容器配置 / view config
+cat /var/lib/lxc/<container>/config
+
+# 删除容器 / destroy
+lxc-destroy -f -n <container>
+```
+
+### 面板部署 / Panel deployment
+
+```bash
+# 源码运行 / run from source
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+./venv/bin/python run.py
+
+# systemd 服务 / systemd service
+systemctl start lxcdeck
+systemctl restart lxcdeck
+journalctl -u lxcdeck -f
+
+# Docker
+docker compose up -d --build
+docker compose logs -f
+```
+
+### Agent / 探针 / Agent & Probe
+
+```bash
+# 安装 / install（面板内复制出来的命令，用 sh 更兼容）
+curl -fsSL https://<panel>/api/agent/install.sh | sh -s -- --api https://<panel> --token <token>
+
+# 卸载 / uninstall
+curl -fsSL https://<panel>/api/agent/uninstall.sh | sh
+
+# 查看 Agent 日志 / agent logs
+journalctl -u lxcdeck-agent -f
+```
+
+### 订阅 / Subscription
+
+```bash
+# 通用订阅（Base64）/ universal subscription
+curl -s https://<panel>/api/sub/<token>
+
+# Clash / Mihomo YAML
+curl -s "https://<panel>/api/sub/<token>?target=clash"
+```
+
+---
+
 ## 订阅中心 / Subscription Center
+
 
 面板在“应用/部署”页提供 🔗 订阅按钮，对标 X-UI-Server：
 
