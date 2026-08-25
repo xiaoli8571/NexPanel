@@ -1110,16 +1110,23 @@ def backup_settings(user: dict = Depends(current_user)):
 @router.post("/backup/settings")
 def backup_save(body: dict, request: Request, admin: dict = Depends(require_admin)):
     from . import backup as backup_mod
+
+    def _int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     data = {
         "backup_enabled": "1" if body.get("enabled", False) else "0",
-        "backup_interval_hours": str(int(body.get("interval_hours", 24))),
+        "backup_interval_hours": str(_int(body.get("interval_hours"), 24)),
         "backup_type": str(body.get("type", "s3")),
         "backup_endpoint": (body.get("endpoint") or "").strip(),
         "backup_region": (body.get("region") or "us-east-1").strip(),
         "backup_bucket": (body.get("bucket") or "nexpanel-backup").strip(),
         "backup_access_key": (body.get("access_key") or "").strip(),
         "backup_secret_key": (body.get("secret_key") or "").strip(),
-        "backup_retention_days": str(int(body.get("retention_days", 30))),
+        "backup_retention_days": str(_int(body.get("retention_days"), 30)),
     }
     backup_mod.save_settings(data)
     db.audit(admin["sub"], "修改备份设置", "system", "", request.client.host)

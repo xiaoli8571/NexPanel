@@ -216,6 +216,12 @@ def _upload_s3(filepath: str, filename: str) -> str:
         return f"S3 上传失败: {str(e)[:200]}"
 
 
+def _webdav_join(base: str, *parts: str) -> str:
+    """安全拼接 WebDAV URL，保留协议双斜杠"""
+    base = (base or "").rstrip("/")
+    return base + "/" + "/".join(str(p).strip("/") for p in parts if p)
+
+
 def _upload_webdav(filepath: str, filename: str) -> str:
     """上传到 WebDAV"""
     cfg = get_settings()
@@ -231,18 +237,16 @@ def _upload_webdav(filepath: str, filename: str) -> str:
         import base64
         import urllib.request
 
-        full_url = f"{url_base}/{path_prefix}/{filename}".replace("//", "/")
-        full_url = full_url.replace(":/", "://")  # 修复 http:// 情况
+        full_url = _webdav_join(url_base, path_prefix, filename)
 
         with open(filepath, "rb") as f:
             body = f.read()
 
         auth = base64.b64encode(f"{username}:{password}".encode()).decode()
 
-        # 先尝试创建目录
+        # 先尝试创建目录（已存在则忽略错误）
         try:
-            dir_url = f"{url_base}/{path_prefix}/backups".replace("//", "/")
-            dir_url = dir_url.replace(":/", "://")
+            dir_url = _webdav_join(url_base, path_prefix, "backups")
             mkcol_req = urllib.request.Request(
                 dir_url, method="MKCOL",
                 headers={"Authorization": f"Basic {auth}"})
@@ -271,11 +275,28 @@ def _cleanup_old_backups() -> str:
     return "ok"
 
 
+def _validate_config(cfg: dict) -> str:
+    """检查备份配置是否完整，返回空字符串表示完整，否则返回错误信息"""
+    if cfg.get("backup_type") == "webdav":
+        if not cfg.get("backup_endpoint") or not cfg.get("backup_access_key"):
+            return "WebDAV 配置不完整：请填写 URL 和用户名"
+    else:
+        if not cfg.get("backup_endpoint") or not cfg.get("backup_access_key") or not cfg.get("backup_secret_key"):
+            return "S3 配置不完整：请填写 Endpoint、Access Key 和 Secret Key"
+    return ""
+
+
 def do_backup() -> str:
     """执行一次完整备份流程，返回结果描述"""
     cfg = get_settings()
     if not cfg.get("backup_enabled", False):
         return "备份未启用"
+
+    # 配置完整性校验（不发送告警，避免配置未填完时刷屏）
+    err = _validate_config(cfg)
+    if err:
+        _update_last_run(err)
+        return err
 
     filename = f"nexpanel-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
     filepath = None
@@ -319,7 +340,12 @@ async def backup_loop():
         try:
             cfg = get_settings()
             if cfg.get("backup_enabled", False):
-                hours = cfg.get("backup_interval_hours", 24)
+                # 配置不完整时降低检查频率，避免每 10 分钟失败一次
+                err = _validate_config(cfg)
+                if err:
+                    await asyncio.sleep(1800)   # 30 分钟后再检查
+                    continue
+                hours = max(1, cfg.get("backup_interval_hours", 24))
                 last_run = cfg.get("backup_last_run", "")
                 should_run = True
                 if last_run:
@@ -338,7 +364,7 @@ async def backup_loop():
                             BACKUP_LOCK["v"] = False
         except Exception as e:
             print(f"[backup] 调度异常: {e}", flush=True)
-        # 每 10 分钟检查一次
+        # 每 10 分钟检查一次（配置完整时）
         await asyncio.sleep(600)
 
 

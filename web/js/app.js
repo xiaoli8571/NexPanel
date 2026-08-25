@@ -1482,7 +1482,7 @@ async function viewSettings(){
     <div class="card"><h4><span class="dot" style="background:#fbbf24"></span>💾 自动备份</h4>
       <div class="form-grid" style="grid-template-columns:1fr">
         <label style="flex-direction:row;align-items:center;gap:8px">
-          <input type="checkbox" id="bk-enable" ${bkCfg.backup_enabled==="1"?"checked":""} style="width:18px;height:18px">
+          <input type="checkbox" id="bk-enable" ${bkCfg.backup_enabled?"checked":""} style="width:18px;height:18px">
           <span>启用自动备份</span>
         </label>
         <label>备份间隔（小时）
