@@ -144,7 +144,7 @@ def _clash_proxy(n: dict, name: str, ip: str) -> str | None:
     return "\n".join(L) + "\n"
 
 
-def build_clash_yaml(specs: list[dict], sub_title="LXCDeck") -> str:
+def build_clash_yaml(specs: list[dict], sub_title="NexPanel") -> str:
     proxies, names = [], []
     used = set()
     for i, n in enumerate(specs):
@@ -201,7 +201,7 @@ def render_subscription(user_agent: str = "", target: str = "") -> tuple[str, st
     specs = collect_specs()
     if wants_clash:
         yaml_text = build_clash_yaml(specs)
-        return yaml_text, "text/yaml; charset=utf-8", "attachment; filename=lxcdeck-clash.yaml"
+        return yaml_text, "text/yaml; charset=utf-8", "attachment; filename=nexpanel-clash.yaml"
     # base64 模式优先用持久化链接（含 naive 等所有协议）
     links = collect_links()
     if not links:
