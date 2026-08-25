@@ -126,7 +126,7 @@ async function updateNodeBadge(){
   const b = $("#mode-badge");
   try{
     const list = await api("/nodes");
-    const online = list.filter(n=>n.status==="online").length;
+    const online = list.filter(n=>n.status==="online"||n.status==="nolxc").length;
     if(!list.length){ b.textContent = "⊕ 尚未接入服务器节点"; b.classList.add("demo"); return; }
     b.classList.remove("demo");
     b.innerHTML = `<span style="color:${online?'var(--ok)':'var(--err)'}">●</span> ${online}/${list.length} 节点在线`;
