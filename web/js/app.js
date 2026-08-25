@@ -1516,11 +1516,13 @@ async function viewSettings(){
       <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
         <button class="btn primary" id="bk-save">保存</button>
         <button class="btn" id="bk-run">立即备份</button>
+        <button class="btn warn" id="bk-restore">↩ 恢复备份</button>
         <span style="color:var(--muted);font-size:12px">
           ${bkCfg.backup_last_run ? `上次：${esc(bkCfg.backup_last_run)}` : '尚未执行过'}
           ${bkCfg.backup_last_result ? ` · 结果：${bkCfg.backup_last_result === 'ok' ? '✅ 成功' : '❌ ' + esc(bkCfg.backup_last_result)}` : ''}
         </span>
       </div>
+      <input type="file" id="bk-restore-file" accept=".tar.gz,.tgz" style="display:none">
     </div>
     ` : ""}
     ${isAdmin ? `
@@ -1591,6 +1593,42 @@ async function viewSettings(){
     }catch(e){ toast(e.message,"err",5000); }
     btn.disabled=false; btn.textContent="立即备份";
   };
+
+  // 恢复备份：选择本地 .tar.gz 文件上传，覆盖当前数据库
+  const bkRestore = $("#bk-restore");
+  const bkRestoreFile = $("#bk-restore-file");
+  if(bkRestore && bkRestoreFile){
+    bkRestore.onclick = ()=>{
+      bkRestoreFile.value = "";
+      bkRestoreFile.click();
+    };
+    bkRestoreFile.onchange = async ()=>{
+      const file = bkRestoreFile.files && bkRestoreFile.files[0];
+      if(!file) return;
+      if(!(await confirmModal(
+        `<p>⚠️ 确定从备份文件 <b>${esc(file.name)}</b> 恢复数据库？</p>
+        <p style="color:var(--muted);font-size:12px;margin-top:8px">
+        当前数据库将被覆盖，恢复前会自动备份当前数据到 data/panel.db.bak.*。<br>
+        建议恢复完成后重启面板服务。</p>`, true))) { bkRestoreFile.value=""; return; }
+      const fd = new FormData();
+      fd.append("file", file);
+      const btn = bkRestore;
+      btn.disabled = true; btn.textContent = "恢复中…";
+      try{
+        const r = await fetch("/api/backup/restore", {
+          method:"POST",
+          headers:{ Authorization: "Bearer "+state.token },
+          body: fd,
+        });
+        const data = await r.json().catch(()=>({}));
+        if(!r.ok) throw new Error(data.detail || `恢复失败(${r.status})`);
+        toast(data.message || "恢复成功，建议重启面板","ok",6000);
+        setTimeout(()=>location.reload(), 800);
+      }catch(e){ toast(e.message,"err",6000); }
+      btn.disabled = false; btn.textContent = "↩ 恢复备份";
+      bkRestoreFile.value = "";
+    };
+  }
 
   const rd = $("#reset-demo");
   if(rd) rd.onclick = async ()=>{

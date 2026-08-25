@@ -2,3 +2,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 paramiko>=3.4
 cryptography>=42.0
+python-multipart>=0.0.9

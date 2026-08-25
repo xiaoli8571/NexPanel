@@ -394,6 +394,13 @@ def restore_from_backup(filepath: str) -> str:
     try:
         tmp_dir = tempfile.mkdtemp()
         with tarfile.open(filepath, "r:gz") as tar:
+            # 安全校验：拒绝绝对路径 / .. / 符号链接，防止路径穿越
+            for m in tar.getmembers():
+                name = m.name.replace("\\", "/")
+                if name.startswith("/") or ".." in name.split("/"):
+                    raise ValueError(f"备份文件包含不安全路径: {m.name}")
+                if m.issym() or m.islnk():
+                    raise ValueError(f"备份文件包含链接，已拒绝: {m.name}")
             tar.extractall(path=tmp_dir)
 
         # 验证文件完整性
@@ -401,24 +408,50 @@ def restore_from_backup(filepath: str) -> str:
         if not db_file.exists():
             return "备份文件中缺少 panel.db"
 
-        # 停止当前数据库连接
-        db._conn.close()
+        # 停止当前数据库连接（如果有）
+        if db._conn:
+            try:
+                db._conn.close()
+            except Exception:
+                pass
         db._conn = None
 
-        # 备份当前数据库（安全）
+        # 备份当前数据库（安全，便于回滚）
         backup_name = f"panel.db.bak.{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        shutil.copy2(str(data_dir / "panel.db"), str(data_dir / backup_name))
+        if (data_dir / "panel.db").exists():
+            shutil.copy2(str(data_dir / "panel.db"), str(data_dir / backup_name))
 
-        # 恢复文件
-        for name in ("panel.db", "panel.db-wal", "panel.db-shm"):
-            src = pathlib.Path(tmp_dir) / name
-            if src.exists():
-                shutil.copy2(str(src), str(data_dir / name))
+        # 恢复文件：先只放 DB，WAL/SHM 让 SQLite 重建，避免旧 WAL 不匹配
+        src = pathlib.Path(tmp_dir) / "panel.db"
+        shutil.copy2(str(src), str(data_dir / "panel.db"))
+        for stale in ("panel.db-wal", "panel.db-shm"):
+            p = data_dir / stale
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
 
-        # 重新连接
+        # 重新连接并做完整性校验
         db.connect()
-        db.init_schema()
+        try:
+            row = db.one("PRAGMA integrity_check")
+            if not row or row[0] != "ok":
+                raise ValueError(f"数据库完整性校验失败: {row[0] if row else 'unknown'}")
+        except Exception:
+            # 回滚到备份
+            try:
+                if db._conn:
+                    db._conn.close()
+                db._conn = None
+                shutil.copy2(str(data_dir / backup_name), str(data_dir / "panel.db"))
+                db.connect()
+                db.init_schema()
+            except Exception:
+                pass
+            raise
 
+        db.init_schema()
         return "ok"
     except Exception as e:
         return f"恢复失败: {str(e)[:200]}"
