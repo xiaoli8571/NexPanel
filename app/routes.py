@@ -335,9 +335,16 @@ def delete_node(nid: int, request: Request, force: int = 0,
             pass
         db.ex("DELETE FROM snapshots WHERE container_id=?", (c["id"],))
     db.ex("DELETE FROM containers WHERE node_id=?", (nid,))
-    monitor.stop_node(nid)
     db.ex("DELETE FROM nodes WHERE id=?", (nid,))
-    db.audit(admin["sub"], "删除节点", node["name"], "", request.client.host)
+    # 清理监控/审计为“尽力而为”，即使 VPS 已删除也不影响节点删除成功
+    try:
+        monitor.stop_node(nid)
+    except Exception:
+        pass
+    try:
+        db.audit(admin["sub"], "删除节点", node["name"], "", request.client.host)
+    except Exception:
+        pass
     return {"ok": True}
 
 

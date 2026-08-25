@@ -273,5 +273,12 @@ async def node_terminal(ws: WebSocket, nid: int, token: str = ""):
         await _demo_terminal(ws, fake)
 
 
+# ────────────── 未知 WebSocket 统一优雅关闭（避免落到静态文件 500） ──────────────
+@app.websocket("/{path:path}")
+async def ws_catchall(ws: WebSocket, path: str):
+    with suppress(Exception):
+        await ws.close(code=4404)
+
+
 # ────────────── 静态前端(置于 API 之后) ──────────────
 app.mount("/", StaticFiles(directory=str(config.WEB_DIR), html=True), name="web")
