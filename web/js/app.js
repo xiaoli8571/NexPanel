@@ -142,6 +142,7 @@ const NAV = [
   { id:"templates", label:"镜像模板", icon:"layers",  title:"系统模板库" },
   { id:"snapshots", label:"快照备份", icon:"camera",  title:"快照与回滚" },
   { id:"network",   label:"网络拓扑", icon:"globe",   title:"网络与 IP 分配" },
+  { id:"traffic",   label:"流量统计", icon:"activity",title:"节点流量统计" },
   { id:"probes",    label:"主机探针", icon:"activity",title:"探针监控" },
   { id:"users",     label:"用户管理", icon:"users",   title:"用户与权限" },
   { id:"audit",     label:"审计日志", icon:"file",    title:"操作审计日志" },
@@ -162,8 +163,8 @@ function nav(){
   $("#page-title").textContent = item.title;
   const fn = { dashboard:viewDashboard, nodes:viewNodes, containers:viewContainers,
     apps:viewApps, probes:viewProbes, templates:viewTemplates,
-    snapshots:viewSnapshots, network:viewNetwork, users:viewUsers,
-    audit:viewAudit,
+    snapshots:viewSnapshots, network:viewNetwork, traffic:viewTraffic,
+    users:viewUsers, audit:viewAudit,
     settings:viewSettings }[item.id];
   (fn || viewDashboard)();
 }
@@ -1422,6 +1423,19 @@ async function viewSettings(){
   try{ const ns=await api("/nodes");
     nodesInfo = {total:ns.length, online:ns.filter(n=>n.status==="online").length};
   }catch(e){}
+  const isAdmin = state.user.role === "admin";
+
+  // 加载 Telegram 配置
+  let tgCfg = {bot_token:"", chat_id:"", enabled:false, events:"node_offline,container_crash"};
+  try{ tgCfg = await api("/notify/settings"); }catch(e){}
+
+  // 加载备份配置
+  let bkCfg = {backup_enabled:"0", backup_interval_hours:"24", backup_type:"s3",
+               backup_endpoint:"", backup_region:"us-east-1", backup_bucket:"nexpanel-backup",
+               backup_access_key:"", backup_secret_key:"", backup_retention_days:"30",
+               backup_last_run:"", backup_last_result:""};
+  try{ bkCfg = await api("/backup/settings"); }catch(e){}
+
   $("#content").innerHTML = `
   <div class="grid stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
     <div class="card"><h4><span class="dot"></span>运行环境</h4>
@@ -1444,7 +1458,72 @@ async function viewSettings(){
       </div>
       <button class="btn primary" id="pw-save" style="margin-top:14px">保存修改</button>
     </div>
-    ${state.user.role==="admin"?`
+    ${isAdmin ? `
+    <div class="card"><h4><span class="dot" style="background:#34d399"></span>🤖 Telegram 告警</h4>
+      <div class="form-grid" style="grid-template-columns:1fr">
+        <label>Bot Token<input id="tg-token" value="${esc(tgCfg.bot_token)}" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"></label>
+        <label>目标 Chat ID<input id="tg-chat" value="${esc(tgCfg.chat_id)}" placeholder="群组 / 用户 ID（数字）"></label>
+        <label>告警事件<select id="tg-events" style="margin-top:4px">
+          <option value="node_offline,container_crash" ${tgCfg.events==="node_offline,container_crash"?"selected":""}>离线 + 容器异常</option>
+          <option value="all" ${tgCfg.events==="all"?"selected":""}>全部事件</option>
+          <option value="node_offline" ${tgCfg.events==="node_offline"?"selected":""}>仅节点离线</option>
+          <option value="node_offline,container_crash,backup_fail" ${tgCfg.events==="node_offline,container_crash,backup_fail"?"selected":""}>离线 + 容器 + 备份</option>
+        </select></label>
+        <label style="flex-direction:row;align-items:center;gap:8px;margin-top:6px">
+          <input type="checkbox" id="tg-enable" ${tgCfg.enabled?"checked":""} style="width:18px;height:18px">
+          <span>启用 Telegram 告警</span>
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn primary" id="tg-save">保存</button>
+        <button class="btn" id="tg-test">测试发送</button>
+      </div>
+    </div>
+    <div class="card"><h4><span class="dot" style="background:#fbbf24"></span>💾 自动备份</h4>
+      <div class="form-grid" style="grid-template-columns:1fr">
+        <label style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" id="bk-enable" ${bkCfg.backup_enabled==="1"?"checked":""} style="width:18px;height:18px">
+          <span>启用自动备份</span>
+        </label>
+        <label>备份间隔（小时）
+          <input id="bk-interval" type="number" value="${esc(bkCfg.backup_interval_hours||"24")}" min="1" max="720">
+        </label>
+        <label>存储类型
+          <select id="bk-type">
+            <option value="s3" ${bkCfg.backup_type==="s3"?"selected":""}>S3 兼容存储</option>
+            <option value="webdav" ${bkCfg.backup_type==="webdav"?"selected":""}>WebDAV</option>
+          </select>
+        </label>
+        <label>Endpoint / URL
+          <input id="bk-endpoint" value="${esc(bkCfg.backup_endpoint)}" placeholder="https://s3.amazonaws.com">
+        </label>
+        <label>Region
+          <input id="bk-region" value="${esc(bkCfg.backup_region||"us-east-1")}" placeholder="us-east-1">
+        </label>
+        <label>Bucket / 路径
+          <input id="bk-bucket" value="${esc(bkCfg.backup_bucket||"nexpanel-backup")}" placeholder="nexpanel-backup">
+        </label>
+        <label>Access Key / 用户名
+          <input id="bk-ak" value="${esc(bkCfg.backup_access_key)}" placeholder="S3 Access Key / WebDAV 用户名">
+        </label>
+        <label>Secret Key / 密码
+          <input id="bk-sk" type="password" value="${esc(bkCfg.backup_secret_key)}" placeholder="S3 Secret Key / WebDAV 密码">
+        </label>
+        <label>保留天数
+          <input id="bk-retention" type="number" value="${esc(bkCfg.backup_retention_days||"30")}" min="0" max="365">
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
+        <button class="btn primary" id="bk-save">保存</button>
+        <button class="btn" id="bk-run">立即备份</button>
+        <span style="color:var(--muted);font-size:12px">
+          ${bkCfg.backup_last_run ? `上次：${esc(bkCfg.backup_last_run)}` : '尚未执行过'}
+          ${bkCfg.backup_last_result ? ` · 结果：${bkCfg.backup_last_result === 'ok' ? '✅ 成功' : '❌ ' + esc(bkCfg.backup_last_result)}` : ''}
+        </span>
+      </div>
+    </div>
+    ` : ""}
+    ${isAdmin ? `
     <div class="card" style="border-color:rgba(239,68,68,.35)">
       <h4><span class="dot" style="background:var(--err)"></span>危险操作</h4>
       <p style="color:var(--muted);font-size:12.5px;margin-bottom:14px">
@@ -1459,6 +1538,60 @@ async function viewSettings(){
       toast("密码修改成功","ok"); $("#pw-old").value=$("#pw-new").value=$("#pw-new2").value=""; }
     catch(e){ toast(e.message,"err"); }
   };
+
+  // Telegram 配置
+  const tgSave = $("#tg-save");
+  if(tgSave) tgSave.onclick = async ()=>{
+    try{
+      await api("/notify/settings", {method:"POST", body:{
+        bot_token: $("#tg-token").value.trim(),
+        chat_id: $("#tg-chat").value.trim(),
+        enabled: $("#tg-enable").checked,
+        events: $("#tg-events").value,
+      }});
+      toast("Telegram 告警配置已保存","ok"); viewSettings();
+    }catch(e){ toast(e.message,"err"); }
+  };
+  const tgTest = $("#tg-test");
+  if(tgTest) tgTest.onclick = async ()=>{
+    try{
+      await api("/notify/test", {method:"POST", body:{
+        bot_token: $("#tg-token").value.trim(),
+        chat_id: $("#tg-chat").value.trim(),
+      }});
+      toast("测试消息已发送，请检查 Telegram","ok",5000);
+    }catch(e){ toast(e.message,"err",5000); }
+  };
+
+  // 备份配置
+  const bkSave = $("#bk-save");
+  if(bkSave) bkSave.onclick = async ()=>{
+    try{
+      await api("/backup/settings", {method:"POST", body:{
+        enabled: $("#bk-enable").checked,
+        interval_hours: parseInt($("#bk-interval").value) || 24,
+        type: $("#bk-type").value,
+        endpoint: $("#bk-endpoint").value.trim(),
+        region: $("#bk-region").value.trim(),
+        bucket: $("#bk-bucket").value.trim(),
+        access_key: $("#bk-ak").value.trim(),
+        secret_key: $("#bk-sk").value.trim(),
+        retention_days: parseInt($("#bk-retention").value) || 30,
+      }});
+      toast("备份配置已保存","ok"); viewSettings();
+    }catch(e){ toast(e.message,"err"); }
+  };
+  const bkRun = $("#bk-run");
+  if(bkRun) bkRun.onclick = async ()=>{
+    bkRun.disabled=true; bkRun.textContent="备份中…";
+    const btn = bkRun;
+    try{
+      const r = await api("/backup/run", {method:"POST"});
+      toast(r.message||"备份完成","ok",5000); viewSettings();
+    }catch(e){ toast(e.message,"err",5000); }
+    btn.disabled=false; btn.textContent="立即备份";
+  };
+
   const rd = $("#reset-demo");
   if(rd) rd.onclick = async ()=>{
     if(!(await confirmModal("⚠ 确定清空所有节点上的全部实例与快照？",true))) return;
@@ -1466,6 +1599,65 @@ async function viewSettings(){
       setTimeout(()=>location.reload(), 800); }
     catch(e){ toast(e.message,"err"); }
   };
+}
+
+/* ══════════════ 视图：流量统计 ══════════════ */
+async function viewTraffic(){
+  const isAdmin = state.user.role === "admin";
+  $("#content").innerHTML = `
+    <div class="page-head">
+      <span class="sub">节点流量统计 · 最近 30 天</span>
+      <span class="spacer"></span>
+      <button class="btn" id="tf-refresh">${icon("rotate",13)} 刷新</button>
+    </div>
+    <div class="card" style="padding:6px 12px"><div class="table-wrap"><table>
+      <thead><tr><th>节点名称</th><th>类型</th><th>下载 (RX)</th><th>上传 (TX)</th><th>合计</th></tr></thead>
+      <tbody id="tf-body"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+    </table></div></div>
+    <div style="margin-top:16px" class="grid stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+      <div class="card"><h4><span class="dot" style="background:var(--ok)"></span>每日流量明细</h4>
+        <div class="table-wrap" style="max-height:400px;overflow-y:auto"><table>
+          <thead><tr><th>日期</th><th>节点</th><th>RX</th><th>TX</th></tr></thead>
+          <tbody id="tf-daily"></tbody>
+        </table></div>
+      </div>
+    </div>`;
+
+  const load = async ()=>{
+    try{
+      const list = await api("/traffic/nodes");
+      let totalRx=0, totalTx=0;
+      $("#tf-body").innerHTML = list.map(n=>{
+        totalRx += n.total_rx_mb; totalTx += n.total_tx_mb;
+        return `<tr>
+          <td><b>${esc(n.name)}</b></td>
+          <td><span class="badge">节点 #${n.node_id}</span></td>
+          <td class="mono">${fmtGB(n.total_rx_mb)}</td>
+          <td class="mono">${fmtGB(n.total_tx_mb)}</td>
+          <td class="mono"><b>${fmtGB(n.total_mb)}</b></td>
+        </tr>`;
+      }).join("") + `<tr style="font-weight:bold;border-top:2px solid var(--border)">
+        <td colspan="2">总计</td>
+        <td class="mono">${fmtGB(totalRx)}</td>
+        <td class="mono">${fmtGB(totalTx)}</td>
+        <td class="mono">${fmtGB(totalRx+totalTx)}</td>
+      </tr>`;
+    }catch(e){ $("#tf-body").innerHTML=`<tr><td colspan="5" class="empty">${esc(e.message)}</td></tr>`; }
+
+    // 加载每日明细
+    try{
+      const today = new Date().toISOString().slice(0,10);
+      const daily = await api("/traffic/daily?date="+today);
+      $("#tf-daily").innerHTML = daily.map(d=>
+        `<tr><td class="mono">${esc(d.date)}</td>
+        <td>${esc(d.name||"#"+d.node_id)}</td>
+        <td class="mono">${fmtGB(d.rx_bytes/1048576)}</td>
+        <td class="mono">${fmtGB(d.tx_bytes/1048576)}</td></tr>`
+      ).join("") || `<tr><td colspan="4" class="empty">暂无数据</td></tr>`;
+    }catch(e){ $("#tf-daily").innerHTML=`<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`; }
+  };
+  load();
+  $("#tf-refresh").onclick = load;
 }
 
 /* ══════════════ 弹窗框架 ══════════════ */

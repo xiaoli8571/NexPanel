@@ -132,6 +132,33 @@ CREATE TABLE IF NOT EXISTS templates(
   size_mb REAL NOT NULL,
   arch TEXT NOT NULL DEFAULT 'amd64'
 );
+CREATE TABLE IF NOT EXISTS traffic_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id INTEGER NOT NULL,
+  rx_bytes INTEGER DEFAULT 0,
+  tx_bytes INTEGER DEFAULT 0,
+  recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_node_date ON traffic_log(node_id, recorded_at);
+CREATE TABLE IF NOT EXISTS traffic_daily (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  rx_bytes INTEGER DEFAULT 0,
+  tx_bytes INTEGER DEFAULT 0,
+  UNIQUE(node_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_node ON traffic_daily(node_id, date);
+CREATE TABLE IF NOT EXISTS subscription_limits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  app_id INTEGER NOT NULL,
+  traffic_limit_mb INTEGER DEFAULT 0,
+  bandwidth_limit_kbps INTEGER DEFAULT 0,
+  expire_at TEXT DEFAULT '',
+  notes TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_limits_app ON subscription_limits(app_id);
 """
 
 SEED_USERS = [
@@ -169,6 +196,14 @@ def migrate():
         _conn.execute("UPDATE apps SET node_id = (SELECT n.id FROM nodes n WHERE n.name = apps.name) WHERE node_id IS NULL AND container_id IS NULL")
         _conn.commit()
         print("[db] apps.node_id added and backfilled")
+
+    # apps 表补流量统计字段
+    if acols and "traffic_rx_bytes" not in acols:
+        _conn.execute("ALTER TABLE apps ADD COLUMN traffic_rx_bytes INTEGER DEFAULT 0")
+        _conn.execute("ALTER TABLE apps ADD COLUMN traffic_tx_bytes INTEGER DEFAULT 0")
+        _conn.execute("ALTER TABLE apps ADD COLUMN traffic_reset_at TEXT DEFAULT ''")
+        _conn.commit()
+        print("[db] apps traffic fields added")
 
     # nodes 表补 agent 相关列 + 排序
     ncols = [r[1] for r in _conn.execute("PRAGMA table_info(nodes)")]

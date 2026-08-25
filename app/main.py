@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from . import config, db, monitor, nodes as nodes_mod
 from . import agent as agent_mod
 from . import security
+from . import backup as backup_mod
+from . import traffic as traffic_mod
 from .routes import router
 
 
@@ -19,8 +21,11 @@ async def lifespan(app: FastAPI):
     db.init_schema()
     db.seed()
     monitor.start_all()
+    # 启动定时备份调度
+    backup_mod.start_scheduler()
     yield
     await monitor.shutdown()
+    backup_mod.stop_scheduler()
 
 
 app = FastAPI(title="NexPanel", version=config.VERSION, lifespan=lifespan)

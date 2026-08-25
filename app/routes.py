@@ -1,5 +1,6 @@
 """REST API 路由（多节点版）"""
 import json
+import os
 import re
 import uuid as uuidlib
 
@@ -1055,6 +1056,239 @@ def delete_user(uid: int, request: Request, admin: dict = Depends(require_admin)
 def audit_list(limit: int = 100, user: dict = Depends(current_user)):
     limit = min(max(limit, 1), 500)
     return [dict(r) for r in db.q("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,))]
+
+
+# ═══════════════════════ 通知告警(TG) ═══════════════════════
+@router.get("/notify/settings")
+def notify_settings(user: dict = Depends(current_user)):
+    from . import notify as notify_mod
+    return notify_mod.get_settings()
+
+
+@router.post("/notify/settings")
+def notify_save(body: dict, request: Request, admin: dict = Depends(require_admin)):
+    from . import notify as notify_mod
+    bot_token = (body.get("bot_token") or "").strip()
+    chat_id = (body.get("chat_id") or "").strip()
+    enabled = bool(body.get("enabled", False))
+    events = (body.get("events") or "node_offline,container_crash").strip()
+    notify_mod.save_settings(bot_token, chat_id, enabled, events)
+    db.audit(admin["sub"], "修改通知设置", "system", "", request.client.host)
+    return {"ok": True}
+
+
+@router.post("/notify/test")
+def notify_test(body: dict, request: Request, user: dict = Depends(current_user)):
+    from . import notify as notify_mod
+    # 临时用请求中的配置发一条测试消息
+    bot_token = (body.get("bot_token") or "").strip()
+    chat_id = (body.get("chat_id") or "").strip()
+    if not bot_token or not chat_id:
+        raise HTTPException(400, "请先填写 Bot Token 和 Chat ID")
+    # 保存原配置，发送后恢复
+    old_cfg = notify_mod.get_settings()
+    notify_mod.save_settings(bot_token, chat_id, True, "all")
+    ok = notify_mod.send_telegram(
+        "<b>🔔 NexPanel 测试消息</b>\n"
+        f"如果您收到此消息，说明 Telegram 告警配置正确！\n"
+        f"<i>{db.now()}</i>")
+    # 恢复原配置
+    notify_mod.save_settings(old_cfg["bot_token"], old_cfg["chat_id"],
+                             old_cfg["enabled"], old_cfg["events"])
+    if not ok:
+        raise HTTPException(400, "发送失败，请检查 Bot Token 和 Chat ID 是否正确")
+    return {"ok": True, "message": "测试消息已发送，请检查 Telegram"}
+
+
+# ═══════════════════════ 备份 / 恢复 ═══════════════════════
+@router.get("/backup/settings")
+def backup_settings(user: dict = Depends(current_user)):
+    from . import backup as backup_mod
+    return backup_mod.get_settings()
+
+
+@router.post("/backup/settings")
+def backup_save(body: dict, request: Request, admin: dict = Depends(require_admin)):
+    from . import backup as backup_mod
+    data = {
+        "backup_enabled": "1" if body.get("enabled", False) else "0",
+        "backup_interval_hours": str(int(body.get("interval_hours", 24))),
+        "backup_type": str(body.get("type", "s3")),
+        "backup_endpoint": (body.get("endpoint") or "").strip(),
+        "backup_region": (body.get("region") or "us-east-1").strip(),
+        "backup_bucket": (body.get("bucket") or "nexpanel-backup").strip(),
+        "backup_access_key": (body.get("access_key") or "").strip(),
+        "backup_secret_key": (body.get("secret_key") or "").strip(),
+        "backup_retention_days": str(int(body.get("retention_days", 30))),
+    }
+    backup_mod.save_settings(data)
+    db.audit(admin["sub"], "修改备份设置", "system", "", request.client.host)
+    return {"ok": True}
+
+
+@router.post("/backup/run")
+def backup_run(request: Request, admin: dict = Depends(require_admin)):
+    """立即执行一次备份"""
+    from . import backup as backup_mod
+    import asyncio
+    try:
+        result = backup_mod.do_backup()
+        if result != "ok":
+            raise HTTPException(500, f"备份失败: {result}")
+        db.audit(admin["sub"], "手动备份", "system", "成功", request.client.host)
+        return {"ok": True, "message": "备份完成"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"备份异常: {e}")
+
+
+@router.post("/backup/restore")
+async def backup_restore(request: Request, admin: dict = Depends(require_admin)):
+    """从上传的备份文件恢复数据库"""
+    from . import backup as backup_mod
+    import tempfile
+    import shutil
+    import pathlib
+
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        raise HTTPException(400, "请上传备份文件")
+
+    tmp = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
+        content = await file.read()
+        with open(tmp.name, "wb") as f:
+            f.write(content)
+
+        result = backup_mod.restore_from_backup(tmp.name)
+        if result != "ok":
+            raise HTTPException(500, f"恢复失败: {result}")
+
+        db.audit(admin["sub"], "从备份恢复", "system", f"文件: {file.filename}", request.client.host)
+        return {"ok": True, "message": "数据库已从备份恢复，建议重启面板"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"恢复异常: {e}")
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+
+
+# ═══════════════════════ 流量统计 ═══════════════════════
+@router.get("/traffic/nodes")
+def traffic_nodes(user: dict = Depends(current_user)):
+    from . import traffic as traffic_mod
+    return traffic_mod.get_all_traffic(days=30)
+
+
+@router.get("/traffic/node/{node_id}")
+def traffic_node(node_id: int, days: int = 30, user: dict = Depends(current_user)):
+    from . import traffic as traffic_mod
+    # 验证节点存在
+    row = db.one("SELECT id FROM nodes WHERE id=?", (node_id,))
+    if not row:
+        raise HTTPException(404, "节点不存在")
+    return traffic_mod.get_node_traffic(node_id, days)
+
+
+@router.get("/traffic/daily")
+def traffic_daily(date: str = "", user: dict = Depends(current_user)):
+    """获取指定日期的流量汇总"""
+    from . import traffic as traffic_mod
+    if not date:
+        from datetime import datetime
+        date = datetime.now().strftime("%Y-%m-%d")
+    rows = db.q("SELECT t.node_id, n.name, t.rx_bytes, t.tx_bytes "
+                "FROM traffic_daily t LEFT JOIN nodes n ON n.id = t.node_id "
+                "WHERE t.date=? ORDER BY t.rx_bytes + t.tx_bytes DESC", date)
+    return [dict(r) for r in rows]
+
+
+# ═══════════════════════ 订阅限额 ═══════════════════════
+@router.get("/subscription/limits")
+def subscription_limits(user: dict = Depends(current_user)):
+    """获取全部应用的订阅限额"""
+    from . import traffic as traffic_mod
+    result = []
+    for app in db.q("SELECT id, name, app_type FROM apps ORDER BY id"):
+        limit = traffic_mod.get_subscription_limit(app["id"])
+        limit["app_name"] = app["name"]
+        limit["app_type"] = app["app_type"]
+        # 检查状态
+        status = traffic_mod.check_subscription_status(app["id"])
+        limit["status"] = status.get("ok", True)
+        limit["status_reason"] = status.get("reason", "")
+        if status.get("warnings"):
+            limit["warnings"] = status["warnings"]
+        # 流量使用情况
+        used = traffic_mod.aggregate_app_traffic(app["id"])
+        limit["used_mb"] = used["total_mb"]
+        limit["reset_at"] = used["reset_at"]
+        result.append(limit)
+    return result
+
+
+@router.get("/subscription/limit/{app_id}")
+def subscription_limit(app_id: int, user: dict = Depends(current_user)):
+    from . import traffic as traffic_mod
+    app = db.one("SELECT id, name, app_type FROM apps WHERE id=?", (app_id,))
+    if not app:
+        raise HTTPException(404, "应用不存在")
+    limit = traffic_mod.get_subscription_limit(app_id)
+    limit["app_name"] = app["name"]
+    limit["app_type"] = app["app_type"]
+    status = traffic_mod.check_subscription_status(app_id)
+    limit["status"] = status.get("ok", True)
+    limit["status_reason"] = status.get("reason", "")
+    if status.get("warnings"):
+        limit["warnings"] = status["warnings"]
+    used = traffic_mod.aggregate_app_traffic(app_id)
+    limit["used_mb"] = used["total_mb"]
+    limit["reset_at"] = used["reset_at"]
+    return limit
+
+
+@router.post("/subscription/limit/{app_id}")
+def subscription_set_limit(app_id: int, body: dict, request: Request,
+                           admin: dict = Depends(require_admin)):
+    from . import traffic as traffic_mod
+    app = db.one("SELECT id, name FROM apps WHERE id=?", (app_id,))
+    if not app:
+        raise HTTPException(404, "应用不存在")
+    traffic_limit_mb = int(body.get("traffic_limit_mb", 0))
+    bandwidth_limit_kbps = int(body.get("bandwidth_limit_kbps", 0))
+    expire_at = (body.get("expire_at") or "").strip()
+    notes = (body.get("notes") or "").strip()
+    limit = traffic_mod.set_subscription_limit(
+        app_id, traffic_limit_mb, bandwidth_limit_kbps, expire_at, notes)
+    db.audit(admin["sub"], "修改订阅限额", app["name"],
+             f"流量: {traffic_limit_mb}MB, 过期: {expire_at}", request.client.host)
+    return limit
+
+
+@router.get("/subscription/stats")
+def subscription_stats(user: dict = Depends(current_user)):
+    """订阅总体统计"""
+    from . import traffic as traffic_mod
+    total_apps = db.one("SELECT COUNT(*) n FROM apps")["n"]
+    limited_apps = db.one("SELECT COUNT(*) n FROM subscription_limits")["n"]
+    over_limit = 0
+    for app in db.q("SELECT id FROM apps"):
+        status = traffic_mod.check_subscription_status(app["id"])
+        if not status.get("ok", True):
+            over_limit += 1
+    return {
+        "total_apps": total_apps,
+        "limited_apps": limited_apps,
+        "over_limit": over_limit,
+    }
 
 
 # ────────────────────────── admin ops ──────────────────────────

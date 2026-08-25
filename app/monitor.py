@@ -31,6 +31,17 @@ async def _ssh_loop(node: dict):
                 os_info = CACHE[nid]["host"]["os"] if CACHE[nid].get("host") else ""
                 db.ex("UPDATE nodes SET status=?, lxc_ok=?, os_info=? WHERE id=?",
                       ("online" if status == "online" else "nolxc", lxc_ok, os_info, nid))
+            # 记录流量
+            try:
+                from . import traffic as traffic_mod
+                host = CACHE[nid].get("host")
+                if host:
+                    rx = host.get("rx_kbps", 0)
+                    tx = host.get("tx_kbps", 0)
+                    if rx > 0 or tx > 0:
+                        traffic_mod.record_traffic(nid, rx, tx)
+            except Exception:
+                pass
         except Exception as e:
             CACHE[nid] = {"status": "offline", "error": str(e)[:200],
                           "updated": time.time(), "host": None, "cts": {}}
@@ -233,6 +244,15 @@ def agent_report(node_id: int, report: dict):
     try:
         db.ex("UPDATE nodes SET status='online', os_info=?, public_ip=COALESCE(NULLIF(?,''),public_ip), last_seen=? WHERE id=?",
               (sysinfo.get("os", ""), sysinfo.get("public_ip", ""), db_now_str(), node_id))
+    except Exception:
+        pass
+    # 记录流量
+    try:
+        from . import traffic as traffic_mod
+        rx = host.get("rx_kbps", 0)
+        tx = host.get("tx_kbps", 0)
+        if rx > 0 or tx > 0:
+            traffic_mod.record_traffic(node_id, rx, tx)
     except Exception:
         pass
 
