@@ -1,8 +1,8 @@
 services:
-  lxcdeck:
+  nexpanel:
     build: .
-    image: lxcdeck:latest
-    container_name: lxcdeck-panel
+    image: nexpanel:latest
+    container_name: nexpanel-panel
     restart: unless-stopped
     # 只暴露到本机回环，由宿主机上的 Caddy/Nginx 反代 + TLS 对外
     ports:
@@ -28,7 +28,7 @@ services:
   # 已有反向代理时保持注释即可；启用前编辑 deploy/Caddyfile.sample
   # caddy:
   #   image: caddy:2
-  #   container_name: lxcdeck-caddy
+  #   container_name: nexpanel-caddy
   #   restart: unless-stopped
   #   network_mode: host        # 直接使用宿主网络，便于 80/443 与 ACME
   #   volumes:

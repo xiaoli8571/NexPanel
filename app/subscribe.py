@@ -160,7 +160,7 @@ def build_clash_yaml(specs: list[dict], sub_title="LXCDeck") -> str:
 
     names_yaml = "\n".join(f"      - {_y(x)}" for x in names) if names else "      - DIRECT"
     return f"""# {sub_title} · Clash.Meta / mihomo 订阅
-# 由 LXC Deck 自动生成  ({len(names)} 个节点)
+# 由 NexPanel 自动生成  ({len(names)} 个节点)
 port: 7890
 socks-port: 7891
 allow-lan: false

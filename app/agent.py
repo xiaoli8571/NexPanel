@@ -136,7 +136,7 @@ def offline_nodes():
 
 # ══════════════ 目标机上运行的 Agent（单文件、零依赖） ══════════════
 AGENT_PY = r'''#!/usr/bin/env python3
-"""LXC Deck Agent — 反向接入面板，零依赖(HTTP 轮询)。安装即接管。"""
+"""NexPanel Agent — 反向接入面板，零依赖(HTTP 轮询)。安装即接管。"""
 import base64, json, os, platform, socket, subprocess, sys, threading, time
 import urllib.request
 
@@ -495,7 +495,7 @@ if __name__ == "__main__":
 '''
 
 UNINSTALL_SH = r'''#!/bin/sh
-# LXC Deck Agent/探针 一键清理脚本
+# NexPanel Agent/探针 一键清理脚本
 # 用法: curl -fsSL <面板地址>/api/agent/uninstall.sh | sh
 pkill -f "/opt/lxcdeck-agent/agent.py" 2>/dev/null || true
 sleep 1
@@ -512,12 +512,12 @@ rm -rf /opt/lxcdeck-agent
 if pgrep -f "/opt/lxcdeck-agent/agent.py" >/dev/null 2>&1; then
   echo "[WARN] 仍有残留进程，请手动执行: pkill -9 -f lxcdeck"
 else
-  echo "[OK] LXC Deck Agent/探针 已从本机彻底清除（服务已停止并删除）"
+  echo "[OK] NexPanel Agent/探针 已从本机彻底清除（服务已停止并删除）"
 fi
 '''
 
 INSTALL_SH = r'''#!/bin/sh
-# LXC Deck Agent 一键安装脚本（支持 Debian/Ubuntu/CentOS/Rocky/Alpine）
+# NexPanel Agent 一键安装脚本（支持 Debian/Ubuntu/CentOS/Rocky/Alpine）
 set -e
 API="__API__"; TOKEN="__TOKEN__"
 while [ "$#" -gt 0 ]; do
@@ -559,7 +559,7 @@ if command -v systemctl >/dev/null 2>&1; then
   # systemd 发行版（Debian/Ubuntu/CentOS/Rocky 等）
   cat > /etc/systemd/system/lxcdeck-agent.service <<EOF2
 [Unit]
-Description=LXC Deck Agent
+Description=NexPanel Agent
 After=network.target
 [Service]
 ExecStart=/usr/bin/python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN
@@ -571,7 +571,7 @@ EOF2
   systemctl daemon-reload
   systemctl enable --now lxcdeck-agent
   sleep 2
-  systemctl is-active lxcdeck-agent && echo "[OK] LXC Deck Agent 已上线"
+  systemctl is-active lxcdeck-agent && echo "[OK] NexPanel Agent 已上线"
 elif command -v rc-service >/dev/null 2>&1; then
   # Alpine / OpenRC
   cat > /opt/lxcdeck-agent/run.sh <<EOF2
@@ -594,7 +594,7 @@ EOF2
   rc-update add lxcdeck-agent default >/dev/null 2>&1 || true
   rc-service lxcdeck-agent start
   sleep 2
-  rc-service lxcdeck-agent status >/dev/null 2>&1 && echo "[OK] LXC Deck Agent 已上线"
+  rc-service lxcdeck-agent status >/dev/null 2>&1 && echo "[OK] NexPanel Agent 已上线"
 else
   echo "[WARN] 未检测到 systemd/OpenRC，请手动执行: nohup python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN &"
 fi

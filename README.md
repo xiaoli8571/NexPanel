@@ -1,4 +1,4 @@
-# LXC Deck · 轻量级 LXC 管理面板 / Lightweight LXC Management Panel
+# NexPanel · 多节点管理与代理面板 / Multi-Node Management & Proxy Panel
 
 > **中文**：参照 [NodeHatch](https://docs.nodehatch.com/zh/) 的产品思路设计的多节点 LXC 管理面板。
 > 面板本身可安装在任何服务器上，通过 Agent 反向连接或 SSH 接入目标机器，远程管理其上的 LXC 容器；
@@ -60,7 +60,7 @@ python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 ```bash
 # /etc/systemd/system/lxcdeck.service
 [Unit]
-Description=LXC Deck Panel
+Description=NexPanel Panel
 After=network.target
 
 [Service]

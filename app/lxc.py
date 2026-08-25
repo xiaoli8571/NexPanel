@@ -185,7 +185,7 @@ CONFIG="/var/lib/lxc/$NAME/config"
 if ! grep -q '^lxc.net.0.type' "$CONFIG" 2>/dev/null; then
   cat >> "$CONFIG" <<'NET'
 
-# LXC Deck default network
+# NexPanel default network
 lxc.net.0.type = veth
 lxc.net.0.link = lxcbr0
 lxc.net.0.flags = up

@@ -1,4 +1,4 @@
-/* ═══════════════════ LXC Deck · 前端 SPA ═══════════════════ */
+/* ═══════════════════ NexPanel · 前端 SPA ═══════════════════ */
 "use strict";
 
 /* ---------- 小工具 ---------- */
@@ -271,7 +271,7 @@ function viewDashboard(){
     <div class="card">
       <h4><span class="dot"></span>面板信息</h4>
       <dl class="kv" style="margin-top:4px">
-        <dt>面板版本</dt><dd>LXC Deck ${esc(state.meta?.version||"")}</dd>
+        <dt>面板版本</dt><dd>NexPanel ${esc(state.meta?.version||"")}</dd>
         <dt>架构模式</dt><dd>中心面板 · SSH 多节点</dd>
         <dt>接入节点</dt><dd id="hi-nodes">—</dd>
         <dt>登录账号</dt><dd>${esc(state.user?.username||"-")}（${state.user?.role==="admin"?"管理员":"普通用户"}）</dd>
@@ -1412,7 +1412,7 @@ async function viewSettings(){
   <div class="grid stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
     <div class="card"><h4><span class="dot"></span>运行环境</h4>
       <dl class="kv">
-        <dt>面板版本</dt><dd>LXC Deck ${esc(state.meta?.version||"v0.2.0")}</dd>
+        <dt>面板版本</dt><dd>NexPanel ${esc(state.meta?.version||"v0.2.0")}</dd>
         <dt>架构模式</dt><dd><span style="color:var(--ok)">中心面板 · SSH 多节点</span></dd>
         <dt>接入节点</dt><dd>${nodesInfo.online} 在线 / 共 ${nodesInfo.total}</dd>
         <dt>数据库</dt><dd>SQLite · data/panel.db</dd>

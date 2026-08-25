@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
     await monitor.shutdown()
 
 
-app = FastAPI(title="LXC Deck", version=config.VERSION, lifespan=lifespan)
+app = FastAPI(title="NexPanel", version=config.VERSION, lifespan=lifespan)
 app.include_router(router)
 
 

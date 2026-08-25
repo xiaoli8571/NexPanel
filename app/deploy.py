@@ -298,7 +298,7 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
   cat > /etc/systemd/system/sing-box.service <<UNIT
 [Unit]
-Description=sing-box (LXC Deck)
+Description=sing-box (NexPanel)
 After=network.target
 [Service]
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json

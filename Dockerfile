@@ -1,5 +1,5 @@
-# LXC Deck — 生产镜像
-# 构建: docker build -t lxcdeck:latest .
+# NexPanel — 生产镜像
+# 构建: docker build -t nexpanel:latest .
 # 运行: 见 docker-compose.yml
 FROM python:3.12-slim
 
