@@ -180,7 +180,7 @@ def build_links(nodes_spec, ip: str, name_prefix: str) -> list[str]:
     links = []
     for n in nodes_spec:
         proto, port, sni = n["protocol"], n["port"], n.get("sni") or DEFAULT_SNI
-        remark = quote(f"{name_prefix}-{proto}-{port}", safe="")
+        remark = quote(f"{name_prefix}-{proto}", safe="")
         pbk, sid = n.get("public_key", ""), n.get("short_id", "")
         if proto == "XTLS-Reality":
             links.append(f"vless://{n['uuid']}@{ip}:{port}?type=tcp&security=reality"

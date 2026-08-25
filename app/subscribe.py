@@ -148,7 +148,7 @@ def build_clash_yaml(specs: list[dict], sub_title="LXCDeck") -> str:
     proxies, names = [], []
     used = set()
     for i, n in enumerate(specs):
-        base = f"{n.get('_app', 'node')}-{n['protocol']}-{n['port']}"
+        base = f"{n.get('_app', 'node')}-{n['protocol']}"
         nm, k = base, 2
         while nm in used:
             nm, k = f"{base}#{k}", k + 1
