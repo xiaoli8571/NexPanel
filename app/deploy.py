@@ -551,8 +551,9 @@ def _machine_app_specs(container_id: int | None, node_id: int,
                     container_id, exclude_app_id, exclude_app_id)
     else:
         rows = db.q("SELECT params FROM apps WHERE status='done' AND container_id IS NULL "
-                    "AND node_id=? AND (? IS NULL OR id != ?) ORDER BY id",
-                    node_id, exclude_app_id, exclude_app_id)
+                    "AND (node_id=? OR (node_id IS NULL AND name=(SELECT name FROM nodes WHERE id=?))) "
+                    "AND (? IS NULL OR id != ?) ORDER BY id",
+                    node_id, node_id, exclude_app_id, exclude_app_id)
     specs: list[dict] = []
     for r in rows:
         try:
