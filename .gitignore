@@ -7,3 +7,4 @@ data/
 .env
 nohup.out
 .DS_Store
+SESSION_SUMMARY.md

@@ -329,13 +329,30 @@ def delete_node(nid: int, request: Request, force: int = 0,
     if children and not force:
         raise HTTPException(400, f"该节点下还有 {children} 台实例，请先删除或使用强制删除")
     ops = ops_for(node)
+    ct_ids = []
     for c in db.q("SELECT * FROM containers WHERE node_id=?", (nid,)):
+        ct_ids.append(c["id"])
         try:
             ops.delete(dict(c))
         except Exception:
             pass
         db.ex("DELETE FROM snapshots WHERE container_id=?", (c["id"],))
     db.ex("DELETE FROM containers WHERE node_id=?", (nid,))
+
+    # 清理该节点下发的应用（node_id 直装 + 容器内部署），节点已删除不再做远端清理
+    app_ids = set()
+    for r in db.q("SELECT id FROM apps WHERE node_id=?", (nid,)):
+        app_ids.add(r["id"])
+    if ct_ids:
+        placeholders = ",".join("?" * len(ct_ids))
+        for r in db.q(f"SELECT id FROM apps WHERE container_id IN ({placeholders})", *ct_ids):
+            app_ids.add(r["id"])
+    if app_ids:
+        ids = list(app_ids)
+        ph = ",".join("?" * len(ids))
+        db.ex(f"DELETE FROM subscription_limits WHERE app_id IN ({ph})", *ids)
+        db.ex(f"DELETE FROM apps WHERE id IN ({ph})", *ids)
+
     db.ex("DELETE FROM nodes WHERE id=?", (nid,))
     # 清理监控/审计为“尽力而为”，即使 VPS 已删除也不影响节点删除成功
     try:
@@ -343,7 +360,8 @@ def delete_node(nid: int, request: Request, force: int = 0,
     except Exception:
         pass
     try:
-        db.audit(admin["sub"], "删除节点", node["name"], "", request.client.host)
+        db.audit(admin["sub"], "删除节点", node["name"],
+                 f"同时清理 {len(app_ids)} 个应用" if app_ids else "", request.client.host)
     except Exception:
         pass
     return {"ok": True}
@@ -945,8 +963,17 @@ def delete_container(cid: int, request: Request, user: dict = Depends(require_ad
         except Exception:
             pass
     db.ex("DELETE FROM snapshots WHERE container_id=?", (cid,))
+
+    # 清理部署在该容器上的应用（容器已删除，远端配置已不存在，直接清 DB）
+    app_ids = [r["id"] for r in db.q("SELECT id FROM apps WHERE container_id=?", (cid,))]
+    if app_ids:
+        ph = ",".join("?" * len(app_ids))
+        db.ex(f"DELETE FROM subscription_limits WHERE app_id IN ({ph})", *app_ids)
+        db.ex(f"DELETE FROM apps WHERE id IN ({ph})", *app_ids)
+
     db.ex("DELETE FROM containers WHERE id=?", (cid,))
-    db.audit(user["sub"], "删除实例", c["name"], "", request.client.host)
+    db.audit(user["sub"], "删除实例", c["name"],
+             f"同时清理 {len(app_ids)} 个应用" if app_ids else "", request.client.host)
     return {"ok": True}
 
 
