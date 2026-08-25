@@ -362,6 +362,23 @@ def reorder_nodes(body: ReorderIn, request: Request,
     return {"ok": True}
 
 
+class NodeRenameIn(BaseModel):
+    name: str = Field(min_length=2, max_length=32)
+
+
+@router.put("/nodes/{nid}")
+def rename_node(nid: int, body: NodeRenameIn, request: Request,
+                admin: dict = Depends(require_admin)):
+    """修改已添加节点的名称"""
+    node = _get_node(nid)
+    new_name = body.name.strip()
+    if db.one("SELECT id FROM nodes WHERE name=? AND id!=?", (new_name, nid)):
+        raise HTTPException(400, "节点名已存在")
+    db.ex("UPDATE nodes SET name=? WHERE id=?", (new_name, nid))
+    db.audit(admin["sub"], "重命名节点", node["name"], new_name, request.client.host)
+    return {"ok": True, "name": new_name}
+
+
 @router.post("/nodes/{nid}/import-lxc")
 async def import_host_lxc(nid: int, request: Request,
                           admin: dict = Depends(require_admin)):

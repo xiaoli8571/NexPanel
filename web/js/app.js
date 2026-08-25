@@ -435,6 +435,7 @@ async function viewNodes(){
             <button class="btn sm" data-move="${i}" data-dir="-1" title="上移">↑</button>
             <button class="btn sm" data-move="${i}" data-dir="1" title="下移">↓</button>
             <button class="btn sm" data-probe="${n.id}">${icon("activity",12)} 测试</button>
+            <button class="btn sm" data-rename="${n.id}" data-name="${esc(n.name)}" title="重命名节点">✏️ 重命名</button>
             ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 接入</button>`:""}
             ${(n.kind==="ssh"||n.kind==="agent")&&(n.status==="online"||n.status==="nolxc")?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="demo"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="演示控制台">${icon("server",12)} 终端</button>`:""}
@@ -464,6 +465,7 @@ async function viewNodes(){
         try{ await api("/nodes/reorder",{method:"POST",body:{ids}}); render(); }
         catch(e){ toast(e.message,"err"); }
       });
+      $$("#node-grid [data-rename]").forEach(b=>b.onclick=()=>renameNode(+b.dataset.rename, b.dataset.name));
       $$("#node-grid [data-del]").forEach(b=>b.onclick=()=>deleteNode(+b.dataset.del,b.dataset.name));
       $$("#node-grid [data-agent-cmd]").forEach(b=>b.onclick=async()=>{
         const n = (await api("/nodes")).find(x=>String(x.id)===b.dataset.agentCmd);
@@ -499,6 +501,21 @@ async function viewNodes(){
   render();
   tickHandle = setInterval(render, 5000);
 }
+
+window.renameNode = async function(id, oldName){
+  const ov = openModal(`重命名节点`, `
+    <label>新名称 *
+      <input id="rn-name" value="${esc(oldName)}" style="margin-top:8px" autocomplete="off">
+    </label>`,
+    async ()=>{
+      const nn = $("#rn-name").value.trim();
+      if(!nn || nn.length<2 || nn.length>32) return toast("名称需 2-32 个字符","err");
+      try{
+        await api(`/nodes/${id}`, {method:"PUT", body:{name: nn}});
+        closeModal(); toast("节点已重命名","ok"); viewNodes();
+      }catch(e){ toast(e.message,"err"); }
+    }, "保存");
+};
 
 window.deleteNode = async function(id, name){
   let node = null;
