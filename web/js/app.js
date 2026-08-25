@@ -1151,14 +1151,11 @@ window.openSubModal = async function(){
     const info = await api("/apps/sub-info");
     const ov = openModal(`🔗 订阅中心`, `
       <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
-        将以下订阅链接导入客户端即可自动同步面板下发的全部节点（当前 <b>${info.nodes}</b> 个）。
-        链接按 User-Agent 自动适配格式。</p>
-      <label style="display:block;font-size:12px;color:var(--muted)">通用订阅（v2rayNG / Shadowrocket / NekoBox，Base64）</label>
+        将以下<b>一个订阅链接</b>导入任意客户端即可自动同步面板下发的全部节点（当前 <b>${info.nodes}</b> 个）。
+        链接会自动适配：Clash/Mihomo 客户端返回 YAML，其他客户端返回 Base64，无需区分软件。</p>
+      <label style="display:block;font-size:12px;color:var(--muted)">统一订阅链接（所有客户端通用）</label>
       <div class="term" style="height:auto;padding:12px;user-select:all;word-break:break-all" id="sub-url-box">${esc(info.url)}</div>
       <button class="btn sm block" style="margin-top:8px" onclick="copyText(document.getElementById('sub-url-box').textContent)">📋 复制订阅链接</button>
-      <label style="display:block;font-size:12px;color:var(--muted);margin-top:14px">Clash / mihomo / Stash / FlClash（YAML）</label>
-      <div class="term" style="height:auto;padding:12px;user-select:all;word-break:break-all" id="sub-clash-box">${esc(info.clash_url)}</div>
-      <button class="btn sm block" style="margin-top:8px" onclick="copyText(document.getElementById('sub-clash-box').textContent)">📋 复制 Clash 订阅</button>
       <p style="color:var(--muted);font-size:11.5px;margin-top:12px;line-height:1.7">
         · 新部署节点后客户端刷新订阅即可拉取<br>
         · Token 泄露时可重置，旧链接立即失效<br></p>
