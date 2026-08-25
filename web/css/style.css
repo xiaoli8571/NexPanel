@@ -138,7 +138,7 @@ tbody tr:last-child td{border-bottom:none}
 
 .bar{height:6px;border-radius:4px;background:rgba(148,163,184,.15);overflow:hidden;min-width:70px}
 .bar i{display:block;height:100%;border-radius:4px;background:var(--ok);transition:width .5s}
-.actions-cell{display:flex;gap:6px}
+.actions-cell{display:flex;gap:6px;flex-wrap:wrap}
 .act-btn{
   width:29px;height:29px;border-radius:8px;border:1px solid var(--line-strong);background:transparent;color:var(--muted);
   display:grid;place-items:center;cursor:pointer;transition:.15s}
