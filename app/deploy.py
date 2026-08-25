@@ -308,7 +308,8 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now sing-box
+  systemctl enable sing-box >/dev/null 2>&1 || true
+  systemctl restart sing-box
 elif command -v rc-service >/dev/null 2>&1; then
   cat > /etc/init.d/sing-box <<'RC'
 #!/sbin/openrc-run
