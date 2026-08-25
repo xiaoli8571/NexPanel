@@ -438,6 +438,7 @@ async function viewNodes(){
             ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 接入</button>`:""}
             ${(n.kind==="ssh"||n.kind==="agent")&&(n.status==="online"||n.status==="nolxc")?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="demo"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="演示控制台">${icon("server",12)} 终端</button>`:""}
+            ${(n.kind==="agent"||n.kind==="ssh")&&!isProbe?`<button class="btn sm" data-import-lxc="${n.id}" title="把宿主机已有的 LXC 容器导入面板">${icon("server",12)} 导入LXC</button>`:""}
             ${n.kind==="agent"?`<button class="btn sm" data-uninst="${n.id}" title="生成一键清理命令">${icon("trash",12)} 卸载</button>`:""}
             <button class="btn sm danger" data-del="${n.id}" data-name="${esc(n.name)}">${icon("trash",12)} 删除</button>
           </div>
@@ -475,6 +476,15 @@ async function viewNodes(){
         showUninstallModal(n);
       });
       $$("#node-grid [data-term]").forEach(b=>b.onclick=()=>openNodeTerminal(+b.dataset.term, b.dataset.name));
+      $$("#node-grid [data-import-lxc]").forEach(b=>b.onclick=async()=>{
+        if(!(await confirmModal("从宿主机扫描并导入已有 LXC 容器？已存在的容器不会重复导入。", true))) return;
+        b.disabled=true; b.textContent="导入中…";
+        try{
+          const r = await api(`/nodes/${b.dataset.importLxc}/import-lxc`,{method:"POST"});
+          toast(`已导入 ${r.imported} 个容器`,"ok",4000); render();
+        }catch(e){ toast(e.message,"err"); }
+        b.disabled=false; b.textContent="导入LXC";
+      });
       $$("#node-grid [data-install]").forEach(b=>b.onclick=async()=>{
         b.disabled=true; b.textContent="安装中…";
         toast("正在通过 SSH 安装 LXC，可能需要几分钟…","info",6000);
@@ -717,6 +727,7 @@ async function loadCT(){
         <button class="act-btn warn" title="停止" ${!run?"disabled":""} onclick="ctAction(${c.id},'stop')">${icon("stop")}</button>
         <button class="act-btn warn" title="重启" ${!run?"disabled":""} onclick="ctAction(${c.id},'restart')">${icon("rotate")}</button>
         <button class="act-btn" title="控制台" onclick="openConsole(${c.id},'${esc(c.name)}')">${icon("term")}</button>
+        <button class="act-btn" title="编辑配置(需停止)" ${run?"disabled":""} onclick="editContainerConfig(${c.id},'${esc(c.name)}',${c.cpu},${c.mem},${c.disk})">${icon("cpu")}</button>
         <button class="act-btn" title="创建快照" onclick="openSnapModal(${c.id},'${esc(c.name)}')">${icon("camera")}</button>
         <button class="act-btn err" title="删除(需管理员)" onclick="deleteContainer(${c.id},'${esc(c.name)}')">${icon("trash")}</button>
       </div></td></tr>`;
@@ -731,6 +742,25 @@ window.ctAction = async (id, action)=>{
     toast({ start:"启动指令已下发", stop:"停止指令已下发", restart:"重启指令已下发" }[action], "ok");
     _lastCTKey=""; loadCT();
   }catch(e){ toast(e.message,"err"); }
+};
+
+window.editContainerConfig = async function(id, name, cpu, mem, disk){
+  const ov = openModal(`编辑配置 — <b>${esc(name)}</b>`, `
+    <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:12px">
+      修改前请先停止容器。CPU/内存会同步到 LXC 配置，磁盘为面板配额（dir 类型根目录不实际扩容）。</p>
+    <div class="form-grid">
+      <label>vCPU 核数<input id="ec-cpu" type="number" min="1" max="16" value="${cpu}"></label>
+      <label>内存 MB<input id="ec-mem" type="number" min="64" step="64" value="${mem}"></label>
+      <label>磁盘 GB<input id="ec-disk" type="number" min="1" max="2048" value="${disk}"></label>
+    </div>`,
+    async ()=>{
+      try{
+        await api(`/containers/${id}/config`, {method:"PUT", body:{
+          cpu:+$("#ec-cpu").value||cpu, mem:+$("#ec-mem").value||mem, disk:+$("#ec-disk").value||disk
+        }});
+        closeModal(); toast("配置已更新","ok"); _lastCTKey=""; loadCT();
+      }catch(e){ toast(e.message,"err"); }
+    }, "保存");
 };
 
 window.deleteContainer = async (id, name)=>{

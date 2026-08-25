@@ -362,6 +362,49 @@ def reorder_nodes(body: ReorderIn, request: Request,
     return {"ok": True}
 
 
+@router.post("/nodes/{nid}/import-lxc")
+async def import_host_lxc(nid: int, request: Request,
+                          admin: dict = Depends(require_admin)):
+    """把宿主机上已有的 LXC 容器导入面板（例如面板自身所在容器）"""
+    from . import deploy as deploy_mod
+    node = _get_node(nid)
+    if node["kind"] not in ("agent", "ssh"):
+        raise HTTPException(400, "仅支持 Agent/SSH 节点导入")
+    script = r'''
+for n in $(lxc-ls -1 2>/dev/null); do
+  st=$(lxc-info -s -n "$n" 2>/dev/null | awk '{print $2}')
+  ip=$(lxc-info -iH -n "$n" 2>/dev/null | head -1)
+  echo "CT|$n|${st:-stopped}|$ip"
+done
+'''
+    try:
+        rc, out = await deploy_mod._exec_on_node(
+            dict(node), script, {"id":"import","log":[],"status":"","result":None}, 60)
+    except Exception as e:
+        raise HTTPException(500, f"读取宿主机 LXC 失败: {e}")
+    imported = 0
+    for line in out.splitlines():
+        if not line.startswith("CT|"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 2:
+            continue
+        name = parts[1].strip()
+        state = parts[2].strip().lower() if len(parts) > 2 else "stopped"
+        ip = parts[3].strip() if len(parts) > 3 else ""
+        if not name or db.one("SELECT id FROM containers WHERE name=?", (name,)):
+            continue
+        db.ex("""INSERT INTO containers(uuid,name,node_id,template,status,cpu,mem,disk,ip,note,created_at)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+              uuidlib.uuid4().hex[:16], name, nid, "existing",
+              "running" if state == "running" else "stopped",
+              1, 512, 5, ip, "从宿主机导入", db.now())
+        imported += 1
+    db.audit(admin["sub"], "导入宿主机LXC", node["name"],
+             f"导入 {imported} 个容器", request.client.host)
+    return {"ok": True, "imported": imported, "output": out[-500:]}
+
+
 # ────────────────────────── agent REST ──────────────────────────
 from fastapi import Request as _Req
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -799,6 +842,76 @@ def container_action(cid: int, body: ActionIn, request: Request,
     db.audit(user["sub"], {"start": "启动", "stop": "停止", "restart": "重启"}[body.action],
              c["name"], f"@{node['name']}", request.client.host)
     return {"ok": True, "status": new_status}
+
+
+class ContainerConfigIn(BaseModel):
+    cpu: int = Field(1, ge=1, le=16)
+    mem: int = Field(512, ge=64, le=1048576, multiple_of=64)
+    disk: int = Field(5, ge=1, le=2048)
+
+
+@router.put("/containers/{cid}/config")
+def update_container_config(cid: int, body: ContainerConfigIn, request: Request,
+                            admin: dict = Depends(require_admin)):
+    """修改已创建 LXC 的配置（需先停止容器）"""
+    row = db.one("SELECT * FROM containers WHERE id=?", (cid,))
+    if not row:
+        raise HTTPException(404, "实例不存在")
+    c = dict(row)
+    if c["status"] == "running":
+        raise HTTPException(400, "请先停止容器再修改配置")
+    node = _get_node(c["node_id"]) if c["node_id"] else None
+    if not node or node["kind"] == "demo":
+        raise HTTPException(400, "该实例不支持修改配置")
+
+    # 更新数据库
+    db.ex("UPDATE containers SET cpu=?, mem=?, disk=? WHERE id=?",
+          (body.cpu, body.mem, body.disk, cid))
+
+    # 同步到 LXC 配置文件（agent/ssh 节点）
+    if node["kind"] in ("agent", "ssh"):
+        from . import deploy as deploy_mod
+        mem_bytes = body.mem * 1024 * 1024
+        cpu_quota = body.cpu * 100000
+        script = f'''
+NAME="{c['name']}"
+CONFIG="/var/lib/lxc/$NAME/config"
+if command -v python3 >/dev/null 2>&1; then
+  python3 - <<'PY'
+name = "{c['name']}"
+cfg = f"/var/lib/lxc/{{name}}/config"
+mem = {mem_bytes}
+cpu = {cpu_quota}
+try:
+    lines = open(cfg).read().splitlines()
+except Exception:
+    lines = []
+out = []
+mem_set = cpu_set = False
+for ln in lines:
+    if ln.startswith('lxc.cgroup2.memory.max'):
+        out.append(f'lxc.cgroup2.memory.max = {{mem}}'); mem_set = True
+    elif ln.startswith('lxc.cgroup2.cpu.max'):
+        out.append(f'lxc.cgroup2.cpu.max = {{cpu}} 100000'); cpu_set = True
+    else:
+        out.append(ln)
+if not mem_set: out.append(f'lxc.cgroup2.memory.max = {{mem}}')
+if not cpu_set: out.append(f'lxc.cgroup2.cpu.max = {{cpu}} 100000')
+open(cfg, 'w').write('\\n'.join(out) + '\\n')
+PY
+else
+  echo "no python3, skip lxc config sync"
+fi
+'''
+        try:
+            deploy_mod._exec_on_node(dict(node), script,
+                                     {"id":"cfg","log":[],"status":"","result":None}, 60)
+        except Exception:
+            pass  # 远端同步失败不阻塞，DB 已更新
+
+    db.audit(admin["sub"], "修改配置", c["name"],
+             f"{body.cpu}C/{body.mem}M/{body.disk}G", request.client.host)
+    return {"ok": True}
 
 
 @router.delete("/containers/{cid}")
