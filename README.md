@@ -37,7 +37,7 @@
 ### 方式一：源码运行 / Run from source
 
 ```bash
-git clone https://github.com/xiaoli8571/lxcdeck.git
+git clone https://github.com/xiaoli8571/nexpanel.git
 cd lxcdeck
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 ./venv/bin/python run.py          # 默认 0.0.0.0:8088
