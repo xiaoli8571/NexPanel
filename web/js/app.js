@@ -1784,8 +1784,10 @@ function openModal(title, bodyHTML, onOk, okText="确定", opts={}){
     </div>`;
   if(opts.onclose) ov._onclose = opts.onclose;
   document.getElementById("modals").appendChild(ov);
-  ov.addEventListener("click", e=>{ if(e.target===ov) closeModal(); });
-  ov.querySelectorAll("[data-x]").forEach(b=>b.onclick=closeModal);
+  // 只关闭/移除自己这一层弹窗，不影响其他层叠打开的弹窗
+  const closeSelf = ()=>{ try{ ov._onclose && ov._onclose(); }catch(e){} ov.remove(); };
+  ov.addEventListener("click", e=>{ if(e.target===ov) closeSelf(); });
+  ov.querySelectorAll("[data-x]").forEach(b=>b.onclick=closeSelf);
   if(onOk) ov.querySelector("[data-ok]").onclick = onOk;
   return ov;
 }
@@ -1798,11 +1800,17 @@ function closeModal(){
 
 function confirmModal(msgHTML, danger=false){
   return new Promise(resolve=>{
+    let done = false;   // 防止 resolve 多次触发
+    const finish = v =>{ if(done) return; done=true; resolve(v); };
     const ov = openModal("请确认", `<p style="font-size:13.5px;line-height:1.8">${msgHTML}</p>`,
-      ()=>{ closeModal(); resolve(true); }, danger?"确认执行":"确定");
+      ()=>{ ov.remove(); finish(true); }, danger?"确认执行":"确定");
     if(danger) ov.querySelector("[data-ok]").className="btn danger";
-    ov.addEventListener("click", e=>{ if(e.target===ov) resolve(false); });
-    ov.querySelectorAll("[data-x]").forEach(b=>b.addEventListener("click",()=>resolve(false)));
+    // 只关闭/移除自己这一层，不影响底下还开着的弹窗（如 Swap 管理窗口）
+    ov.querySelectorAll("[data-x]").forEach(b=>{
+      b.removeEventListener("click", window._noop||(()=>{}));
+      b.addEventListener("click", ()=>{ ov.remove(); finish(false); });
+    });
+    ov.addEventListener("click", e=>{ if(e.target===ov){ ov.remove(); finish(false); } });
   });
 }
 
