@@ -441,6 +441,7 @@ async function viewNodes(){
             ${(n.kind==="ssh"||n.kind==="agent")&&(n.status==="online"||n.status==="nolxc")?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="demo"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="演示控制台">${icon("server",12)} 终端</button>`:""}
             ${(n.kind==="agent"||n.kind==="ssh")&&!isProbe?`<button class="btn sm" data-import-lxc="${n.id}" title="把宿主机已有的 LXC 容器导入面板">${icon("server",12)} 导入LXC</button>`:""}
+            ${(n.kind==="agent"||n.kind==="ssh")&&!isProbe?`<button class="btn sm" data-swap="${n.id}" title="管理宿主机 Swap（给 LXC 小鸡提供内存补充）">${icon("activity",12)} Swap</button>`:""}
             ${n.kind==="agent"?`<button class="btn sm" data-uninst="${n.id}" title="生成一键清理命令">${icon("trash",12)} 卸载</button>`:""}
             <button class="btn sm danger" data-del="${n.id}" data-name="${esc(n.name)}">${icon("trash",12)} 删除</button>
           </div>
@@ -495,6 +496,7 @@ async function viewNodes(){
           toast(r.output.split("\n")[0],"ok",5000); }catch(e){ toast(String(e.message).slice(0,120),"err",5000); }
         render();
       });
+      $$("#node-grid [data-swap]").forEach(b=>b.onclick=()=>openSwapModal(+b.dataset.swap));
     }catch(e){ $("#node-grid").innerHTML=`<div class="empty">${esc(e.message)}</div>`; }
   };
 
@@ -502,6 +504,58 @@ async function viewNodes(){
   render();
   tickHandle = setInterval(render, 5000);
 }
+
+window.openSwapModal = async function(nid){
+  let nodeName = "节点";
+  try{ nodeName = (await api("/nodes")).find(n=>+n.id===+nid)?.name || "节点"; }catch(e){}
+  let status = {total_mb:0, used_mb:0, swappiness:60, files:[], raw:""};
+  try{ status = await api(`/nodes/${nid}/swap`); }catch(e){}
+
+  const ov = openModal(`💾 Swap 管理 — <b>${esc(nodeName)}</b>`, `
+    <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:12px">
+      在宿主机上创建 swap 文件，给 LXC 小鸡提供内存补充。<br>
+      创建后还需在「容器实例 → 编辑配置 → Swap MB」中给具体容器分配 swap。</p>
+    <dl class="kv" style="margin-bottom:12px">
+      <dt>当前 Swap</dt><dd>${status.total_mb? fmtGB(status.total_mb)+" / 已用 "+fmtGB(status.used_mb) : "未启用"}</dd>
+      <dt>Swappiness</dt><dd>${status.swappiness}</dd>
+      ${status.files.map(f=>`<dt>${esc(f.path)}</dt><dd>${esc(f.size)}</dd>`).join("")}
+    </dl>
+    <div class="form-grid" style="grid-template-columns:1fr">
+      <label>创建 Swap 大小（GB）<input id="sw-size" type="number" min="1" max="64" value="1"></label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn primary" id="sw-create">创建/扩容</button>
+      <button class="btn danger" id="sw-delete">删除 Swap</button>
+    </div>
+    <pre class="term" style="margin-top:12px;height:auto;max-height:160px;font-size:11px;white-space:pre-wrap" id="sw-out">${esc(status.raw||"暂无输出")}</pre>`,
+    ()=>closeModal(), "关闭");
+
+  $("#sw-create").onclick = async ()=>{
+    const size = parseInt($("#sw-size").value)||1;
+    if(size < 1 || size > 64) return toast("Swap 大小需在 1-64 GB 之间","err");
+    if(!(await confirmModal(`确定在宿主机创建/扩容为 <b>${size}GB</b> swap 文件？会占用磁盘空间。`, true))) return;
+    const btn = $("#sw-create"); btn.disabled=true; btn.textContent="创建中…";
+    try{
+      const r = await api(`/nodes/${nid}/swap`, {method:"POST", body:{size_gb:size}});
+      $("#sw-out").textContent = r.output || "完成";
+      toast("Swap 创建成功","ok",4000);
+      setTimeout(()=>{ closeModal(); if(location.hash==="#nodes") viewNodes(); }, 1200);
+    }catch(e){ toast(e.message,"err",5000); $("#sw-out").textContent = e.message; }
+    btn.disabled=false; btn.textContent="创建/扩容";
+  };
+
+  $("#sw-delete").onclick = async ()=>{
+    if(!(await confirmModal("确定删除宿主机 swap 文件？已配置使用 swap 的容器将失去 swap 补充。", true))) return;
+    const btn = $("#sw-delete"); btn.disabled=true; btn.textContent="删除中…";
+    try{
+      const r = await api(`/nodes/${nid}/swap`, {method:"DELETE"});
+      $("#sw-out").textContent = r.output || "完成";
+      toast("Swap 已删除","ok",4000);
+      setTimeout(()=>{ closeModal(); if(location.hash==="#nodes") viewNodes(); }, 1200);
+    }catch(e){ toast(e.message,"err",5000); $("#sw-out").textContent = e.message; }
+    btn.disabled=false; btn.textContent="删除 Swap";
+  };
+};
 
 window.renameNode = async function(id, oldName){
   const ov = openModal(`重命名节点`, `

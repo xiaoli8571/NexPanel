@@ -372,6 +372,10 @@ class ReorderIn(BaseModel):
     ids: list[int]
 
 
+class SwapIn(BaseModel):
+    size_gb: int = Field(1, ge=1, le=64)
+
+
 @router.post("/nodes/reorder")
 def reorder_nodes(body: ReorderIn, request: Request,
                   admin: dict = Depends(require_admin)):
@@ -440,6 +444,123 @@ done
     db.audit(admin["sub"], "导入宿主机LXC", node["name"],
              f"导入 {imported} 个容器", request.client.host)
     return {"ok": True, "imported": imported, "output": out[-500:]}
+
+
+# ────────────────────────── 节点 Swap 管理 ──────────────────────────
+@router.get("/nodes/{nid}/swap")
+async def node_swap_status(nid: int, user: dict = Depends(current_user)):
+    """查看节点 swap 状态"""
+    from . import deploy as deploy_mod
+    node = _get_node(nid)
+    if node["kind"] not in ("agent", "ssh"):
+        raise HTTPException(400, "仅支持 Agent/SSH 节点")
+    script = r'''
+echo "=== SWAPINFO ==="
+free -m | awk '/Swap:/{print "total_mb=" $2, "used_mb=" $3}'
+echo "=== SWAPON ==="
+swapon --show --noheadings 2>/dev/null || true
+echo "=== SWAPPINESS ==="
+cat /proc/sys/vm/swappiness 2>/dev/null
+'''
+    try:
+        rc, out = await deploy_mod._exec_on_node(
+            dict(node), script, {"id":"swap","log":[],"status":"","result":None}, 30)
+    except Exception as e:
+        raise HTTPException(500, f"读取 swap 状态失败: {e}")
+    total_mb = 0
+    used_mb = 0
+    swappiness = 60
+    files = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("total_mb="):
+            try: total_mb = int(line.split("=")[1])
+            except Exception: pass
+        elif line.startswith("used_mb="):
+            try: used_mb = int(line.split("=")[1])
+            except Exception: pass
+        elif line.startswith("/") or line.startswith("swap"):
+            parts = line.split()
+            if len(parts) >= 2:
+                files.append({"path": parts[0], "size": parts[1], "used": parts[2] if len(parts) > 2 else ""})
+        elif line.isdigit():
+            swappiness = int(line)
+    return {"total_mb": total_mb, "used_mb": used_mb, "swappiness": swappiness,
+            "files": files, "raw": out[-500:]}
+
+
+@router.post("/nodes/{nid}/swap")
+async def node_swap_create(nid: int, body: SwapIn, request: Request,
+                           admin: dict = Depends(require_admin)):
+    """在宿主机创建/扩容 swap 文件"""
+    from . import deploy as deploy_mod
+    node = _get_node(nid)
+    if node["kind"] not in ("agent", "ssh"):
+        raise HTTPException(400, "仅支持 Agent/SSH 节点")
+    size_gb = max(1, min(body.size_gb, 64))
+    script = f'''
+set -e
+SWAPFILE=/swapfile
+SIZE_GB={size_gb}
+# 磁盘可用空间检查（至少需要 size_gb + 1GB 余量）
+AVAIL_MB=$(df -m / | awk 'NR==2{{print $4}}')
+NEED_MB=$((SIZE_GB * 1024 + 1024))
+if [ "$AVAIL_MB" -lt "$NEED_MB" ]; then
+  echo "ERROR: 磁盘空间不足，可用 ${AVAIL_MB}MB，需要 ${NEED_MB}MB"; exit 1
+fi
+# 如果已有 swapfile 先关闭
+if swapon --show --noheadings 2>/dev/null | grep -q "^$SWAPFILE "; then
+  swapoff "$SWAPFILE" 2>/dev/null || true
+fi
+# 创建 swap 文件
+if command -v fallocate >/dev/null 2>&1; then
+  fallocate -l ${{SIZE_GB}}G "$SWAPFILE"
+else
+  dd if=/dev/zero of="$SWAPFILE" bs=1M count=$((SIZE_GB*1024)) status=none
+fi
+chmod 600 "$SWAPFILE"
+mkswap "$SWAPFILE" >/dev/null
+swapon "$SWAPFILE"
+# 写入 fstab 开机自启
+grep -q "^$SWAPFILE " /etc/fstab 2>/dev/null || echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
+free -h
+'''
+    try:
+        rc, out = await deploy_mod._exec_on_node(
+            dict(node), script, {"id":"swap","log":[],"status":"","result":None}, 120)
+    except Exception as e:
+        raise HTTPException(500, f"创建 swap 失败: {e}")
+    if rc != 0:
+        raise HTTPException(500, out[-400:])
+    db.audit(admin["sub"], "创建Swap", node["name"], f"{size_gb}G", request.client.host)
+    return {"ok": True, "output": out[-500:]}
+
+
+@router.delete("/nodes/{nid}/swap")
+async def node_swap_delete(nid: int, request: Request, admin: dict = Depends(require_admin)):
+    """删除宿主机 swap 文件"""
+    from . import deploy as deploy_mod
+    node = _get_node(nid)
+    if node["kind"] not in ("agent", "ssh"):
+        raise HTTPException(400, "仅支持 Agent/SSH 节点")
+    script = r'''
+SWAPFILE=/swapfile
+if [ -f "$SWAPFILE" ] || swapon --show --noheadings 2>/dev/null | grep -q "$SWAPFILE"; then
+  swapoff "$SWAPFILE" 2>/dev/null || true
+  sed -i "\|^$SWAPFILE |d" /etc/fstab 2>/dev/null || true
+  rm -f "$SWAPFILE"
+  echo "swap removed"
+else
+  echo "no swapfile found"
+fi
+'''
+    try:
+        rc, out = await deploy_mod._exec_on_node(
+            dict(node), script, {"id":"swap","log":[],"status":"","result":None}, 60)
+    except Exception as e:
+        raise HTTPException(500, f"删除 swap 失败: {e}")
+    db.audit(admin["sub"], "删除Swap", node["name"], "", request.client.host)
+    return {"ok": True, "output": out[-300:]}
 
 
 # ────────────────────────── agent REST ──────────────────────────
