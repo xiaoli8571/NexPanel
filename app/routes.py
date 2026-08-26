@@ -40,6 +40,7 @@ class ContainerIn(BaseModel):
     template: str
     cpu: int = Field(1, ge=1, le=16)
     mem: int = Field(512, ge=64, le=1048576, multiple_of=64)   # 支持 64M 粒度
+    swap: int = Field(0, ge=0, le=1048576)                     # swap 内存 MB，0=不额外设置
     disk: int = Field(5, ge=1, le=2048)
     note: str = ""
     autostart: bool = False
@@ -792,7 +793,7 @@ def _row_out(r: dict) -> dict:
     node_row = db.one("SELECT name,kind FROM nodes WHERE id=?", (r["node_id"],)) if r["node_id"] else None
     live = monitor.container_live(r)
     return {**{k: r[k] for k in ("id", "uuid", "name", "node_id", "template", "status",
-                                 "cpu", "mem", "disk", "ip", "note", "created_at")},
+                                 "cpu", "mem", "swap", "disk", "ip", "note", "created_at")},
             "distro": r["template"].split("-")[0],
             "node_name": node_row["name"] if node_row else "(已删除)",
             "node_kind": node_row["kind"] if node_row else "",
@@ -838,10 +839,10 @@ def create_container(body: ContainerIn, request: Request, user: dict = Depends(c
         used = {r["ip"] for r in db.q("SELECT ip FROM containers")}
         ip = next((f"10.0.0.{i}" for i in range(2, 251)
                    if f"10.0.0.{i}" not in used), "")
-    db.ex("""INSERT INTO containers(uuid,name,node_id,template,status,cpu,mem,disk,ip,note,created_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+    db.ex("""INSERT INTO containers(uuid,name,node_id,template,status,cpu,mem,swap,disk,ip,note,created_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
           cid, name, node["id"], body.template, "stopped",
-          body.cpu, body.mem, body.disk, ip, body.note, db.now())
+          body.cpu, body.mem, body.swap, body.disk, ip, body.note, db.now())
     c = dict(db.one("SELECT * FROM containers WHERE uuid=?", (cid,)))
     detail = f"{body.template} / {body.cpu}C·{body.mem}M·{body.disk}G @{node['name']}"
     db.audit(user["sub"], "创建实例", name, detail, request.client.host)
@@ -883,6 +884,7 @@ def container_action(cid: int, body: ActionIn, request: Request,
 class ContainerConfigIn(BaseModel):
     cpu: int = Field(1, ge=1, le=16)
     mem: int = Field(512, ge=64, le=1048576, multiple_of=64)
+    swap: int = Field(0, ge=0, le=1048576)
     disk: int = Field(5, ge=1, le=2048)
 
 
@@ -901,13 +903,14 @@ def update_container_config(cid: int, body: ContainerConfigIn, request: Request,
         raise HTTPException(400, "该实例不支持修改配置")
 
     # 更新数据库
-    db.ex("UPDATE containers SET cpu=?, mem=?, disk=? WHERE id=?",
-          (body.cpu, body.mem, body.disk, cid))
+    db.ex("UPDATE containers SET cpu=?, mem=?, swap=?, disk=? WHERE id=?",
+          (body.cpu, body.mem, body.swap, body.disk, cid))
 
     # 同步到 LXC 配置文件（agent/ssh 节点）
     if node["kind"] in ("agent", "ssh"):
         from . import deploy as deploy_mod
         mem_bytes = body.mem * 1024 * 1024
+        swap_bytes = body.swap * 1024 * 1024 if body.swap > 0 else 0
         cpu_quota = body.cpu * 100000
         script = f'''
 NAME="{c['name']}"
@@ -917,23 +920,29 @@ if command -v python3 >/dev/null 2>&1; then
 name = "{c['name']}"
 cfg = f"/var/lib/lxc/{{name}}/config"
 mem = {mem_bytes}
+swap = {swap_bytes}
 cpu = {cpu_quota}
 try:
     lines = open(cfg).read().splitlines()
 except Exception:
     lines = []
 out = []
-mem_set = cpu_set = False
+mem_set = cpu_set = swap_set = False
 for ln in lines:
     if ln.startswith('lxc.cgroup2.memory.max'):
         out.append(f'lxc.cgroup2.memory.max = {{mem}}'); mem_set = True
+    elif ln.startswith('lxc.cgroup2.memory.swap.max'):
+        if swap > 0:
+            out.append(f'lxc.cgroup2.memory.swap.max = {{swap}}'); swap_set = True
+        # swap=0 时删除该行，恢复 LXC 默认 swap 行为
     elif ln.startswith('lxc.cgroup2.cpu.max'):
         out.append(f'lxc.cgroup2.cpu.max = {{cpu}} 100000'); cpu_set = True
     else:
         out.append(ln)
 if not mem_set: out.append(f'lxc.cgroup2.memory.max = {{mem}}')
 if not cpu_set: out.append(f'lxc.cgroup2.cpu.max = {{cpu}} 100000')
-open(cfg, 'w').write('\\n'.join(out) + '\\n')
+if swap > 0 and not swap_set: out.append(f'lxc.cgroup2.memory.swap.max = {{swap}}')
+open(cfg, 'w').write('\n'.join(out) + '\n')
 PY
 else
   echo "no python3, skip lxc config sync"
@@ -946,7 +955,7 @@ fi
             pass  # 远端同步失败不阻塞，DB 已更新
 
     db.audit(admin["sub"], "修改配置", c["name"],
-             f"{body.cpu}C/{body.mem}M/{body.disk}G", request.client.host)
+             f"{body.cpu}C/{body.mem}M/{body.swap}Swap/{body.disk}G", request.client.host)
     return {"ok": True}
 
 

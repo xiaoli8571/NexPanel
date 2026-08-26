@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS containers(
   status TEXT NOT NULL DEFAULT 'stopped',
   cpu INTEGER NOT NULL DEFAULT 1,
   mem INTEGER NOT NULL DEFAULT 512,
+  swap INTEGER NOT NULL DEFAULT 0,
   disk INTEGER NOT NULL DEFAULT 5,
   ip TEXT DEFAULT '',
   note TEXT DEFAULT '',
@@ -187,6 +188,10 @@ def migrate():
         _conn.execute("DELETE FROM snapshots")
         _conn.executescript(SCHEMA)
         print("[db] migrated: legacy demo containers removed")
+    if cols and "swap" not in cols:
+        _conn.execute("ALTER TABLE containers ADD COLUMN swap INTEGER DEFAULT 0")
+        _conn.commit()
+        print("[db] containers.swap added")
     # apps 表补 node_id（主机直装或容器所在节点）
     acols = [r[1] for r in _conn.execute("PRAGMA table_info(apps)")]
     if acols and "node_id" not in acols:

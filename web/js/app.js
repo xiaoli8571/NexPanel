@@ -735,8 +735,8 @@ async function loadCT(){
       <td>${c.cpu} 核</td>
       <td>${run?`<div style="display:flex;align-items:center;gap:9px">
           <div class="bar" style="flex:1"><i style="width:${memPct}%;background:${barColor(memPct)}"></i></div>
-          <span class="mono" style="font-size:11.5px;color:var(--muted)">${fmtGB(c.live.mem_used_mb)}/${fmtGB(c.mem)}</span>
-        </div>`:`<span style="color:var(--muted)">— / ${fmtGB(c.mem)}</span>`}</td>
+          <span class="mono" style="font-size:11.5px;color:var(--muted)">${fmtGB(c.live.mem_used_mb)}/${fmtGB(c.mem)}${c.swap?`+${fmtGB(c.swap)}S`:""}</span>
+        </div>`:`<span style="color:var(--muted)">— / ${fmtGB(c.mem)}${c.swap?`+${fmtGB(c.swap)}S`:""}</span>`}</td>
       <td>${c.disk} GB</td>
       <td>${c.snapshots?`<span class="tag">${icon("camera",11)} ${c.snapshots}</span>`:"—"}</td>
       <td class="mono" style="font-size:12px">${fmtUp(c.live.uptime_s)}</td>
@@ -745,7 +745,7 @@ async function loadCT(){
         <button class="act-btn warn" title="停止" ${!run?"disabled":""} onclick="ctAction(${c.id},'stop')">${icon("stop")}</button>
         <button class="act-btn warn" title="重启" ${!run?"disabled":""} onclick="ctAction(${c.id},'restart')">${icon("rotate")}</button>
         <button class="act-btn" title="控制台" onclick="openConsole(${c.id},'${esc(c.name)}')">${icon("term")}</button>
-        <button class="act-btn" title="编辑配置(需停止)" ${run?"disabled":""} onclick="editContainerConfig(${c.id},'${esc(c.name)}',${c.cpu},${c.mem},${c.disk})">${icon("cpu")}</button>
+        <button class="act-btn" title="编辑配置(需停止)" ${run?"disabled":""} onclick="editContainerConfig(${c.id},'${esc(c.name)}',${c.cpu},${c.mem},${c.swap||0},${c.disk})">${icon("cpu")}</button>
         <button class="act-btn" title="创建快照" onclick="openSnapModal(${c.id},'${esc(c.name)}')">${icon("camera")}</button>
         <button class="act-btn err" title="删除(需管理员)" onclick="deleteContainer(${c.id},'${esc(c.name)}')">${icon("trash")}</button>
       </div></td></tr>`;
@@ -762,19 +762,22 @@ window.ctAction = async (id, action)=>{
   }catch(e){ toast(e.message,"err"); }
 };
 
-window.editContainerConfig = async function(id, name, cpu, mem, disk){
+window.editContainerConfig = async function(id, name, cpu, mem, swap, disk){
+  swap = swap || 0;
   const ov = openModal(`编辑配置 — <b>${esc(name)}</b>`, `
     <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:12px">
-      修改前请先停止容器。CPU/内存会同步到 LXC 配置，磁盘为面板配额（dir 类型根目录不实际扩容）。</p>
+      修改前请先停止容器。CPU/内存/Swap 会同步到 LXC 配置，磁盘为面板配额（dir 类型根目录不实际扩容）。</p>
     <div class="form-grid">
       <label>vCPU 核数<input id="ec-cpu" type="number" min="1" max="16" value="${cpu}"></label>
       <label>内存 MB<input id="ec-mem" type="number" min="64" step="64" value="${mem}"></label>
+      <label>Swap MB<input id="ec-swap" type="number" min="0" max="1048576" value="${swap}"></label>
       <label>磁盘 GB<input id="ec-disk" type="number" min="1" max="2048" value="${disk}"></label>
     </div>`,
     async ()=>{
       try{
         await api(`/containers/${id}/config`, {method:"PUT", body:{
-          cpu:+$("#ec-cpu").value||cpu, mem:+$("#ec-mem").value||mem, disk:+$("#ec-disk").value||disk
+          cpu:+$("#ec-cpu").value||cpu, mem:+$("#ec-mem").value||mem,
+          swap:+$("#ec-swap").value||0, disk:+$("#ec-disk").value||disk
         }});
         closeModal(); toast("配置已更新","ok"); _lastCTKey=""; loadCT();
       }catch(e){ toast(e.message,"err"); }
@@ -819,12 +822,13 @@ async function openCreateModal(preTpl, preNode){
             ${MEM_PRESETS.slice(0,9).map(v=>`<button type="button" class="chip-btn${v===512?" on":""}" data-v="${v}">${v>=1024?(v/1024)+"G":v+"M"}</button>`).join("")}
           </div>
         </div></label>
+      <label>Swap MB<input id="c-swap" type="number" min="0" max="1048576" value="0" title="为容器分配 swap 作为内存补充，0=不额外设置"></label>
       <label>磁盘 GB<input id="c-disk" type="number" min="1" max="2048" value="10"></label>
       <label>备注<input id="c-note" placeholder="选填"></label>
       <label class="full check-line"><input type="checkbox" id="c-auto" checked style="accent-color:var(--accent)">
         创建完成后立即启动</label>
       <p class="sub full" style="color:var(--muted);font-size:12px">
-        内存支持 64MB 起步、64MB 步进；小规格适合 Alpine/轻量进程。</p>
+        内存支持 64MB 起步、64MB 步进；Swap 可让 LXC 小鸡把磁盘当内存补充（0=不额外设置）。</p>
     </div>`,
     async ()=>{
       const memV = +$("#c-mem").value;
@@ -834,7 +838,7 @@ async function openCreateModal(preTpl, preNode){
         await api("/containers", { method:"POST", body:{
           name:$("#c-name").value.trim().toLowerCase(), template:$("#c-tpl").value,
           node_id:+$("#c-node").value,
-          cpu:+$("#c-cpu").value, mem:memV, disk:+$("#c-disk").value,
+          cpu:+$("#c-cpu").value, mem:memV, swap:+$("#c-swap").value||0, disk:+$("#c-disk").value,
           note:$("#c-note").value.trim(), autostart:$("#c-auto").checked }});
         closeModal();
         toast("创建指令已下发，镜像下载可能需要一些时间","ok",4000);
