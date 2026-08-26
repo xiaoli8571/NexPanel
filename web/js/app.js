@@ -534,26 +534,38 @@ window.openSwapModal = async function(nid){
     const size = parseInt($("#sw-size").value)||1;
     if(size < 1 || size > 64) return toast("Swap 大小需在 1-64 GB 之间","err");
     if(!(await confirmModal(`确定在宿主机创建/扩容为 <b>${size}GB</b> swap 文件？会占用磁盘空间。`, true))) return;
-    const btn = $("#sw-create"); btn.disabled=true; btn.textContent="创建中…";
+    const btn = $("#sw-create"); const delBtn = $("#sw-delete");
+    btn.disabled=true; btn.textContent="⏳ 创建中…"; delBtn.disabled=true;
+    const outBox = $("#sw-out");
+    outBox.textContent = "正在执行创建 Swap 操作…\n如果节点 IO 繁忙（Agent 正在创建 swap），可能需要几分钟，请耐心等待。";
     try{
       const r = await api(`/nodes/${nid}/swap`, {method:"POST", body:{size_gb:size}});
-      $("#sw-out").textContent = r.output || "完成";
-      toast("Swap 创建成功","ok",4000);
-      setTimeout(()=>{ closeModal(); if(location.hash==="#nodes") viewNodes(); }, 1200);
-    }catch(e){ toast(e.message,"err",5000); $("#sw-out").textContent = e.message; }
-    btn.disabled=false; btn.textContent="创建/扩容";
+      outBox.textContent = r.output || "完成";
+      toast("Swap 创建成功","ok",5000);
+    }catch(e){
+      outBox.textContent = "❌ 创建失败：\n" + e.message;
+      toast(e.message,"err",6000);
+    }
+    btn.disabled=false; btn.textContent="重新创建/扩容";
+    delBtn.disabled=false;
   };
 
   $("#sw-delete").onclick = async ()=>{
     if(!(await confirmModal("确定删除宿主机 swap 文件？已配置使用 swap 的容器将失去 swap 补充。", true))) return;
-    const btn = $("#sw-delete"); btn.disabled=true; btn.textContent="删除中…";
+    const btn = $("#sw-delete"); const createBtn = $("#sw-create");
+    btn.disabled=true; btn.textContent="⏳ 删除中…"; createBtn.disabled=true;
+    const outBox = $("#sw-out");
+    outBox.textContent = "正在删除 Swap…";
     try{
       const r = await api(`/nodes/${nid}/swap`, {method:"DELETE"});
-      $("#sw-out").textContent = r.output || "完成";
-      toast("Swap 已删除","ok",4000);
-      setTimeout(()=>{ closeModal(); if(location.hash==="#nodes") viewNodes(); }, 1200);
-    }catch(e){ toast(e.message,"err",5000); $("#sw-out").textContent = e.message; }
+      outBox.textContent = r.output || "完成";
+      toast("Swap 已删除","ok",5000);
+    }catch(e){
+      outBox.textContent = "❌ 删除失败：\n" + e.message;
+      toast(e.message,"err",6000);
+    }
     btn.disabled=false; btn.textContent="删除 Swap";
+    createBtn.disabled=false;
   };
 };
 

@@ -502,38 +502,58 @@ async def node_swap_create(nid: int, body: SwapIn, request: Request,
 set -e
 SWAPFILE=/swapfile
 SIZE_GB={size_gb}
-# 磁盘可用空间检查（至少需要 size_gb + 1GB 余量）
+echo "==> [1/6] 检查磁盘空间"
 AVAIL_MB=$(df -m / | awk 'NR==2{{print $4}}')
 NEED_MB=$((SIZE_GB * 1024 + 1024))
+echo "    可用 ${AVAIL_MB}MB，需要 ${NEED_MB}MB"
 if [ "$AVAIL_MB" -lt "$NEED_MB" ]; then
   echo "ERROR: 磁盘空间不足，可用 ${AVAIL_MB}MB，需要 ${NEED_MB}MB"; exit 1
 fi
-# 如果已有 swapfile 先关闭
+
+echo "==> [2/6] 关闭已有 swapfile（如有）"
 if swapon --show --noheadings 2>/dev/null | grep -q "^$SWAPFILE "; then
   swapoff "$SWAPFILE" 2>/dev/null || true
+  echo "    已关闭旧 swap"
+else
+  echo "    无旧 swap，跳过"
 fi
-# 创建 swap 文件
+
+echo "==> [3/6] 创建 ${{SIZE_GB}}G swap 文件"
 if command -v fallocate >/dev/null 2>&1; then
+  echo "    使用 fallocate 快速分配..."
   fallocate -l ${{SIZE_GB}}G "$SWAPFILE"
 else
-  dd if=/dev/zero of="$SWAPFILE" bs=1M count=$((SIZE_GB*1024)) status=none
+  echo "    使用 dd 写入（较慢，请耐心等待）..."
+  dd if=/dev/zero of="$SWAPFILE" bs=1M count=$((SIZE_GB*1024)) status=progress
 fi
 chmod 600 "$SWAPFILE"
-mkswap "$SWAPFILE" >/dev/null
+echo "    文件已创建: $SWAPFILE ($(du -sh "$SWAPFILE" | cut -f1))"
+
+echo "==> [4/6] 格式化 swap"
+mkswap "$SWAPFILE"
+
+echo "==> [5/6] 启用 swap"
 swapon "$SWAPFILE"
-# 写入 fstab 开机自启
+echo "    已启用"
+
+echo "==> [6/6] 写入 /etc/fstab 开机自启"
 grep -q "^$SWAPFILE " /etc/fstab 2>/dev/null || echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
+echo "    完成"
+
+echo ""
+echo "===== 当前 Swap 状态 ====="
 free -h
+swapon --show
 '''
     try:
         rc, out = await deploy_mod._exec_on_node(
-            dict(node), script, {"id":"swap","log":[],"status":"","result":None}, 120)
+            dict(node), script, {"id":"swap","log":[],"status":"","result":None}, 300)
     except Exception as e:
         raise HTTPException(500, f"创建 swap 失败: {e}")
     if rc != 0:
-        raise HTTPException(500, out[-400:])
+        raise HTTPException(500, out[-800:])
     db.audit(admin["sub"], "创建Swap", node["name"], f"{size_gb}G", request.client.host)
-    return {"ok": True, "output": out[-500:]}
+    return {"ok": True, "output": out[-1500:]}
 
 
 @router.delete("/nodes/{nid}/swap")
