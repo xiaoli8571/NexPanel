@@ -110,6 +110,27 @@ function doLogout(){
 }
 $("#btn-logout").addEventListener("click", doLogout);
 
+/* ---------- 浅色 / 深色主题 ---------- */
+function chartTheme(){
+  const s = getComputedStyle(document.documentElement), g = k => s.getPropertyValue(k).trim();
+  return { axis:g("--chart-axis")||"#5b6b85", grid:g("--chart-grid")||"rgba(148,163,184,.15)",
+           text:g("--chart-text")||"#e6ebf4", muted:g("--chart-muted")||"#8b98ad" };
+}
+function applyTheme(t){
+  document.documentElement.classList.toggle("light", t==="light");
+  const m=$("#ic-moon"), s=$("#ic-sun");           // 月亮=当前深色(点击切浅色)，太阳=当前浅色
+  if(m&&s){ m.classList.toggle("hidden",t==="light"); s.classList.toggle("hidden",t!=="light"); }
+}
+const initTheme = localStorage.getItem("nexp_theme") ||
+  (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+applyTheme(initTheme);
+$("#btn-theme").addEventListener("click", ()=>{
+  const t = document.documentElement.classList.contains("light") ? "dark" : "light";
+  localStorage.setItem("nexp_theme", t);
+  applyTheme(t);
+  if(!$("#app").classList.contains("hidden")) nav();   // 立即重绘当前页(canvas 配色跟随)
+});
+
 async function enterApp(){
   $("#login").classList.add("hidden");
   $("#app").classList.remove("hidden");
@@ -189,7 +210,8 @@ function lineChart(canvas, series, opt={}){
     max = Math.max(10, ...series.flatMap(s=>s.data)) * 1.15;
     if(max < 1) max = 1;
   }
-  ctx.font = "10px ui-monospace"; ctx.fillStyle="#5b6b85"; ctx.strokeStyle="rgba(148,163,184,.12)";
+  const T = chartTheme();
+  ctx.font = "10px ui-monospace"; ctx.fillStyle=T.axis; ctx.strokeStyle=T.grid;
   for(let i=0;i<=4;i++){
     const y = padT + ih*i/4;
     ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
@@ -223,13 +245,14 @@ function gauge(canvas, pct, color){
   ctx.clearRect(0,0,w,h);
   const cx=w/2, cy=h/2, r=Math.min(w,h)/2-7;
   ctx.lineWidth=8; ctx.lineCap="round";
-  ctx.strokeStyle="rgba(148,163,184,.15)";
+  const T = chartTheme();
+  ctx.strokeStyle=T.grid;
   ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
   ctx.strokeStyle=color;
   ctx.beginPath(); ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+Math.PI*2*pct/100); ctx.stroke();
-  ctx.fillStyle="#e6ebf4"; ctx.font="600 17px system-ui"; ctx.textAlign="center";
+  ctx.fillStyle=T.text; ctx.font="600 17px system-ui"; ctx.textAlign="center";
   ctx.fillText(pct.toFixed(1)+"%", cx, cy+1);
-  ctx.fillStyle="#8b98ad"; ctx.font="10.5px system-ui";
+  ctx.fillStyle=T.muted; ctx.font="10.5px system-ui";
   ctx.fillText(canvas.dataset.label||"", cx, cy+18);
 }
 
@@ -318,7 +341,7 @@ function viewDashboard(){
 
       // 节点卡片
       const NS = {online:["var(--ok)","在线"],nolxc:["var(--warn)","未装LXC"],
-                  offline:["var(--err)","离线"],unknown:["#94a3b8","待探测"]};
+                  offline:["var(--err)","离线"],unknown:["var(--muted)","待探测"]};
       $("#dash-nodes").innerHTML = o.nodes_summary.map(n=>{
         const [c,lbl] = NS[n.status]||NS.unknown;
         const L=n.live, memP=L.mem_total_mb?L.mem_used_mb/L.mem_total_mb*100:0,
@@ -336,7 +359,7 @@ function viewDashboard(){
           ${miniBar("磁盘", diskP, L.disk_used_gb+"G / "+L.disk_total_gb+"G")}
           <div style="display:flex;gap:8px;margin-top:10px">
             <span class="tag">${n.counts.total} 台实例</span>
-            <span class="tag" style="color:${n.counts.running?'#86efac':'inherit'}">${n.counts.running} 运行中</span>
+            <span class="tag" style="color:${n.counts.running?'var(--ok-strong)':'inherit'}">${n.counts.running} 运行中</span>
           </div>
         </div>`;
       }).join("") || `<div class="empty" style="grid-column:1/-1">
@@ -384,7 +407,7 @@ const NODE_ST = {
   online:  ["var(--ok)",   "在线"],
   nolxc:   ["var(--warn)", "未装 LXC"],
   offline: ["var(--err)",  "离线"],
-  unknown: ["#94a3b8",     "待探测"],
+  unknown:  ["var(--muted)",  "待探测"],
 };
 async function viewNodes(){
   $("#content").innerHTML = `
@@ -417,7 +440,7 @@ async function viewNodes(){
           </div>
           ${isProbe ? `
             <div class="lat-row">${Object.entries(n.latency||{}).map(([k,v])=>
-              `<span class="tag" style="color:${v==null?"var(--err)":"#86efac"}">${k} ${v==null?"×":v+"ms"}</span>`).join("") || '<span class="tag">延迟采集中…</span>'}</div>`
+              `<span class="tag" style="color:${v==null?"var(--err)":"var(--ok-strong)"}">${k} ${v==null?"×":v+"ms"}</span>`).join("") || '<span class="tag">延迟采集中…</span>'}</div>`
           : `<div style="font-size:12px;color:var(--muted);margin-bottom:10px" class="mono">
               ${esc(n.os_info || (n.error?n.error.slice(0,60):"—"))}</div>`}
           ${n.public_ip?`<div class="mono" style="font-size:11.5px;color:var(--muted);margin-bottom:8px">🌐 ${esc(n.public_ip)}</div>`:""}
@@ -428,8 +451,8 @@ async function viewNodes(){
           <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
             <span class="tag">↑${fmtUp(L.uptime_s||0)}</span>
             ${!isProbe?`<span class="tag">${n.counts.total} 台实例</span>
-            <span class="tag" style="color:${n.counts.running?'#86efac':'inherit'}">${n.counts.running} 运行</span>
-            ${n.install_lxc||n.lxc_ok?`<span class="tag" style="color:#a5f3fc">🖥 母机</span>`:""}
+            <span class="tag" style="color:${n.counts.running?'var(--ok-strong)':'inherit'}">${n.counts.running} 运行</span>
+            ${n.install_lxc||n.lxc_ok?`<span class="tag" style="color:var(--accent-2)">🖥 母机</span>`:""}
             ${n.kind==="agent"&&!n.lxc_ok&&n.status==="online"?`<button class="btn sm primary" data-install="${n.id}">⚡ 安装 LXC</button>`:""}`:""}
           </div>
           <div class="actions-cell" style="margin-top:12px">
@@ -1277,7 +1300,7 @@ async function viewProbes(){
             <span class="tag">⏱ ↑${fmtUp(p.uptime_s)}</span>
             <span class="tag mono">↓${fmtKb(p.rx_kbps)} ↑${fmtKb(p.tx_kbps)}</span>
             ${Object.entries(p.latency||{}).map(([k,v])=>
-              `<span class="tag" style="color:${v==null?"var(--err)":"#86efac"}">${k} ${v==null?"×":v+"ms"}</span>`).join("")}
+              `<span class="tag" style="color:${v==null?"var(--err)":"var(--ok-strong)"}">${k} ${v==null?"×":v+"ms"}</span>`).join("")}
           </div>
           <div class="actions-cell" style="margin-top:12px">
             <button class="btn sm" data-term="${p.id}" data-name="${esc(p.hostname||p.name)}" title="探针终端">${icon("server",12)} 终端</button>
@@ -1386,7 +1409,7 @@ async function viewNetwork(){
   try{
     const n = await api("/network");
     const ST={online:["var(--ok)","在线"],nolxc:["var(--warn)","未装LXC"],
-              offline:["var(--err)","离线"],unknown:["#94a3b8","待探测"]};
+              offline:["var(--err)","离线"],unknown:["var(--muted)","待探测"]};
     $("#br-grid").innerHTML = n.bridges.map(b=>{
       const [c,lbl]=ST[b.state]||ST.unknown;
       return `<div class="card">

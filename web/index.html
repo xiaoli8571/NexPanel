@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NexPanel · 多节点管理与代理面板</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 12l4 4-4 4M15 20h8' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/style.css?v=20260826b">
+<script>try{var t=localStorage.getItem("nexp_theme");if(t==="light"||(!t&&window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches))document.documentElement.classList.add("light")}catch(e){}</script>
 </head>
 <body>
 
@@ -57,6 +58,10 @@
           <span id="who-avatar" class="avatar">A</span>
           <div class="user-meta"><b id="who-name">-</b><i id="who-role">-</i></div>
         </div>
+        <button id="btn-theme" class="btn ghost icon-only" title="切换浅色 / 深色主题">
+          <svg id="ic-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg id="ic-sun" viewBox="0 0 24 24" class="hidden"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        </button>
         <button id="btn-logout" class="btn ghost icon-only" title="退出登录">
           <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         </button>
@@ -69,6 +74,6 @@
 <div id="modals"></div>
 <div id="toasts"></div>
 
-<script src="/js/app.js"></script>
+<script src="/js/app.js?v=20260826b"></script>
 </body>
 </html>
