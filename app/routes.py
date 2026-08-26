@@ -474,15 +474,23 @@ cat /proc/sys/vm/swappiness 2>/dev/null
     for line in out.splitlines():
         line = line.strip()
         if line.startswith("total_mb="):
-            try: total_mb = int(line.split("=")[1])
-            except Exception: pass
-        elif line.startswith("used_mb="):
-            try: used_mb = int(line.split("=")[1])
-            except Exception: pass
-        elif line.startswith("/") or line.startswith("swap"):
+            # awk 输出形如 "total_mb=2048 used_mb=0"（同一行两字段）
+            try:
+                fields = line.split("=", 1)[1].split()
+                total_mb = int(fields[0])
+                for f in fields[1:]:
+                    if f.startswith("used_mb="):
+                        used_mb = int(f.split("=", 1)[1])
+            except Exception:
+                pass
+        elif line.startswith("/"):
+            # swapon --show --noheadings 输出列: NAME TYPE SIZE USED [PRIO]
             parts = line.split()
-            if len(parts) >= 2:
-                files.append({"path": parts[0], "size": parts[1], "used": parts[2] if len(parts) > 2 else ""})
+            if len(parts) >= 4 and parts[1] in ("file", "partition"):
+                files.append({"path": parts[0], "size": parts[2], "used": parts[3]})
+            elif len(parts) >= 2:
+                files.append({"path": parts[0], "size": parts[1],
+                              "used": parts[2] if len(parts) > 2 else ""})
         elif line.isdigit():
             swappiness = int(line)
     return {"total_mb": total_mb, "used_mb": used_mb, "swappiness": swappiness,
