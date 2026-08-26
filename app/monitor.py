@@ -122,13 +122,14 @@ def stop_node(node_id: int):
 
 
 def start_all():
-    global _MAIN_LOOP
+    global _MAIN_LOOP, _SWEEP
     _MAIN_LOOP = asyncio.get_running_loop()
     for row in db.q("SELECT * FROM nodes"):
         if row["kind"] != "agent":
             start_node(row)
         else:
             touch_from_db(row)   # 恢复 last_seen 显示
+    _SWEEP = asyncio.get_running_loop().create_task(_agent_sweep())
 
 
 def touch_from_db(row):
@@ -144,16 +145,40 @@ def touch_from_db(row):
 async def shutdown():
     for tid in list(_tasks):
         stop_node(tid)
+    if _SWEEP:
+        _SWEEP.cancel()
+
+
+# ────────────────── Agent 状态落库回扫 ──────────────────
+_SWEEP: asyncio.Task | None = None
+
+
+async def _agent_sweep():
+    while True:
+        try:
+            _sweep_once()
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+
+
+def _sweep_once():
+    """把 Agent 实时在线状态落库，纠正 nodes.status 残留的旧值"""
+    for row in db.q("SELECT id, status FROM nodes WHERE kind='agent'"):
+        s = "online" if agent_online(row["id"]) else "offline"
+        if row["status"] != s:
+            db.ex("UPDATE nodes SET status=? WHERE id=?", (s, row["id"]))
 
 
 def get_cache(node_id: int) -> dict | None:
     entry = CACHE.get(node_id)
     if not entry:
         return None
-    # 数据过期判定（SSH 节点 20s 未更新视为离线）
-    if entry["status"] == "online" and node_id in _tasks and \
-       time.time() - entry["updated"] > 20 and _tasks[node_id].get_name() != "demo":
-        pass  # 保留最近一次数据，状态由循环自身维护
+    # 数据过期判定（采集周期均 ≤5s，>20s 未更新按离线降级展示，
+    # 避免 Agent 停跳后缓存里的 "online" 变成僵尸在线状态）
+    if time.time() - entry.get("updated", 0) > 20:
+        entry = dict(entry)              # 只降级本次视图，不污染缓存本体
+        entry["status"] = "offline"
     return entry
 
 

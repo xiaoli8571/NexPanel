@@ -86,8 +86,8 @@ def require_admin(user: dict = Depends(current_user)) -> dict:
 @router.get("/meta")
 def meta():
     n_total = db.one("SELECT COUNT(*) n FROM nodes")["n"]
-    online = sum(1 for r in db.q("SELECT id FROM nodes")
-                 if (monitor.get_cache(r["id"]) or {}).get("status") in ("online", "nolxc"))
+    online = sum(1 for r in db.q("SELECT * FROM nodes")
+                 if monitor.summary_of(r)["status"] in ("online", "nolxc"))
     return {"brand": config.BRAND, "version": config.VERSION,
             "nodes_total": n_total, "nodes_online": online}
 
@@ -1030,8 +1030,8 @@ class ContainerConfigIn(BaseModel):
 
 
 @router.put("/containers/{cid}/config")
-def update_container_config(cid: int, body: ContainerConfigIn, request: Request,
-                            admin: dict = Depends(require_admin)):
+async def update_container_config(cid: int, body: ContainerConfigIn, request: Request,
+                                  admin: dict = Depends(require_admin)):
     """修改已创建 LXC 的配置（需先停止容器）"""
     row = db.one("SELECT * FROM containers WHERE id=?", (cid,))
     if not row:
@@ -1090,8 +1090,8 @@ else
 fi
 '''
         try:
-            deploy_mod._exec_on_node(dict(node), script,
-                                     {"id":"cfg","log":[],"status":"","result":None}, 60)
+            await deploy_mod._exec_on_node(dict(node), script,
+                                           {"id":"cfg","log":[],"status":"","result":None}, 60)
         except Exception:
             pass  # 远端同步失败不阻塞，DB 已更新
 
