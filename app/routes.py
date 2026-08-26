@@ -505,9 +505,9 @@ SIZE_GB={size_gb}
 echo "==> [1/6] 检查磁盘空间"
 AVAIL_MB=$(df -m / | awk 'NR==2{{print $4}}')
 NEED_MB=$((SIZE_GB * 1024 + 1024))
-echo "    可用 ${AVAIL_MB}MB，需要 ${NEED_MB}MB"
+echo "    可用 ${{AVAIL_MB}}MB，需要 ${{NEED_MB}}MB"
 if [ "$AVAIL_MB" -lt "$NEED_MB" ]; then
-  echo "ERROR: 磁盘空间不足，可用 ${AVAIL_MB}MB，需要 ${NEED_MB}MB"; exit 1
+  echo "ERROR: 磁盘空间不足，可用 ${{AVAIL_MB}}MB，需要 ${{NEED_MB}}MB"; exit 1
 fi
 
 echo "==> [2/6] 关闭已有 swapfile（如有）"
