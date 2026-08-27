@@ -120,6 +120,8 @@ function applyTheme(t){
   document.documentElement.classList.toggle("light", t==="light");
   const m=$("#ic-moon"), s=$("#ic-sun");           // 月亮=当前深色(点击切浅色)，太阳=当前浅色
   if(m&&s){ m.classList.toggle("hidden",t==="light"); s.classList.toggle("hidden",t!=="light"); }
+  const tc=document.querySelector('meta[name="theme-color"]');   // 手机状态栏跟随主题
+  if(tc) tc.setAttribute("content", t==="light" ? "#f3f5fa" : "#0b0f17");
 }
 const initTheme = localStorage.getItem("nexp_theme") ||
   (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
@@ -1136,7 +1138,7 @@ function renderLinks(links){
   box.innerHTML = links.map((l,i)=>`
     <div style="display:flex;gap:8px;align-items:center;background:var(--bg-soft);
       border:1px solid var(--line);border-radius:9px;padding:9px 12px">
-      <span class="mono" style="flex:1;font-size:11.5px;word-break:break-all;color:#a5d6ff">${esc(l)}</span>
+      <span class="mono" style="flex:1;font-size:11.5px;word-break:break-all;color:var(--accent-2)">${esc(l)}</span>
       <button class="btn sm" onclick="copyText(window._lastLinks[${i}])">复制</button>
     </div>`).join("");
   const btn = $("#btn-copy-all");
@@ -1902,7 +1904,10 @@ class MiniTerm {
       else if(n===1) this.bold=true;
       else if(n===22) this.bold=false;
       else if((n>=30&&n<=37)||n===39||(n>=90&&n<=97)){
-        const map={30:"#64748b",31:"#ef4444",32:"#22c55e",33:"#eab308",34:"#3b82f6",35:"#d946ef",36:"#06b6d4",37:"#e2e8f0",90:"#94a3b8",91:"#f87171",92:"#4ade80",93:"#facc15",94:"#60a5fa",95:"#e879f9",96:"#22d3ee",97:"#f1f5f9"};
+        // 两套调色板：深色终端用亮字，浅色终端用可读的深色变体
+        const dark={30:"#64748b",31:"#ef4444",32:"#22c55e",33:"#eab308",34:"#3b82f6",35:"#d946ef",36:"#06b6d4",37:"#e2e8f0",90:"#94a3b8",91:"#f87171",92:"#4ade80",93:"#facc15",94:"#60a5fa",95:"#e879f9",96:"#22d3ee",97:"#f1f5f9"};
+        const lite={30:"#334155",31:"#dc2626",32:"#16a34a",33:"#b45309",34:"#2563eb",35:"#9333ea",36:"#0891b2",37:"#64748b",90:"#64748b",91:"#ef4444",92:"#15803d",93:"#d97706",94:"#4f46e5",95:"#c026d3",96:"#0e7490",97:"#1e293b"};
+        const map = document.documentElement.classList.contains("light") ? lite : dark;
         this.fg = n===39 ? "" : (map[n]||"");
       }
     }
