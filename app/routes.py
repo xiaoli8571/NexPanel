@@ -688,6 +688,59 @@ def rotate_token(nid: int, admin: dict = Depends(require_admin)):
     return {"ok": True, "agent_token": tok}
 
 
+# ────────────────────────── Agent 升级 / 远程诊断 ──────────────────────────
+class ExecIn(BaseModel):
+    script: str
+    timeout: int = Field(60, ge=5, le=300)
+
+
+@router.post("/nodes/{nid}/upgrade-agent")
+async def node_upgrade_agent(nid: int, request: Request,
+                             admin: dict = Depends(require_admin)):
+    """向在线 Agent 下发自升级脚本（备份→下载面板最新版→校验→重启→失败自动回滚）"""
+    node = _get_node(nid)
+    if node["kind"] != "agent":
+        raise HTTPException(400, "仅 Agent 节点支持")
+    if not agent_mod.is_online(nid):
+        raise HTTPException(409, "Agent 离线，无法下发升级命令")
+    cid = agent_mod.queue_exec(nid, agent_mod.UPGRADE_SH, timeout=150)
+    return {"ok": True, "queued": cid,
+            "note": "已下发，服务数秒内自动重启，请稍后通过节点列表心跳确认恢复"}
+
+
+@router.post("/agents/upgrade-all")
+async def agents_upgrade_all(request: Request,
+                             admin: dict = Depends(require_admin)):
+    """批量升级所有在线 Agent 节点"""
+    rows = db.q("SELECT id,name FROM nodes WHERE kind='agent'")
+    queued, skipped = [], []
+    for r in rows:
+        if agent_mod.is_online(r["id"]):
+            agent_mod.queue_exec(r["id"], agent_mod.UPGRADE_SH, timeout=150)
+            queued.append({"id": r["id"], "name": r["name"]})
+        else:
+            skipped.append({"id": r["id"], "name": r["name"], "reason": "offline"})
+    return {"ok": True, "queued_count": len(queued),
+            "queued": queued, "skipped": skipped}
+
+
+@router.post("/nodes/{nid}/exec")
+async def node_exec_diag(nid: int, body: ExecIn, request: Request,
+                         admin: dict = Depends(require_admin)):
+    """在 Agent 节点上同步执行脚本并返回结果（运维诊断用，≤300s）"""
+    node = _get_node(nid)
+    if node["kind"] != "agent":
+        raise HTTPException(400, "仅 Agent 节点支持")
+    if not agent_mod.is_online(nid):
+        raise HTTPException(409, "Agent 离线")
+    import asyncio as _aio
+    cid = agent_mod.queue_exec(nid, body.script, timeout=body.timeout)
+    res = await _aio.to_thread(agent_mod.wait_result, cid, body.timeout + 15)
+    if not res:
+        raise HTTPException(504, "执行超时或连接中断")
+    return {"rc": int(res.get("rc", 1)), "out": str(res.get("out", ""))[-8000:]}
+
+
 # ────────────────────────── 一键部署 ──────────────────────────
 class DeployIn(BaseModel):
     app_type: str

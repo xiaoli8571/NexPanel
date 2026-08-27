@@ -457,7 +457,7 @@ def main():
     os.makedirs(os.path.dirname(CONF), exist_ok=True)
     json.dump({"api":API,"token":TOKEN}, open(CONF,"w"))
     os.chmod(CONF, 0o600)
-    log(f"started, panel={API}")
+    log(f"started v20260827 (poll=0.18s when pty), panel={API}")
     fail = 0
     _last_rep: dict = {}
     while True:
@@ -597,5 +597,54 @@ EOF2
   rc-service lxcdeck-agent status >/dev/null 2>&1 && echo "[OK] NexPanel Agent 已上线"
 else
   echo "[WARN] 未检测到 systemd/OpenRC，请手动执行: nohup python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN &"
+fi
+'''
+
+UPGRADE_SH = r'''#!/bin/sh
+# NexPanel Agent 自升级：备份 -> 从面板下载新版 -> 校验 -> 原子替换 -> 重启 -> 失败回滚
+set -u
+DIR=/opt/lxcdeck-agent
+cd "$DIR" 2>/dev/null || { echo "[ERR] $DIR 不存在"; exit 1; }
+[ -f agent.conf ] || { echo "[ERR] 缺少 agent.conf"; exit 1; }
+API=$(sed -n 's/.*"api"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' agent.conf)
+TOKEN=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' agent.conf)
+[ -n "$API" ] && [ -n "$TOKEN" ] || { echo "[ERR] agent.conf 解析失败"; exit 1; }
+
+echo "==> [1/4] 备份当前版本"
+cp -f agent.py agent.py.bak 2>/dev/null
+
+echo "==> [2/4] 从面板下载新版"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL --max-time 60 "$API/api/agent/agent.py?token=$TOKEN" -o .new \
+    || { echo "[ERR] 下载失败"; exit 1; }
+else
+  wget -qT 60 -O .new "$API/api/agent/agent.py?token=$TOKEN" \
+    || { echo "[ERR] 下载失败"; exit 1; }
+fi
+[ -s .new ] || { echo "[ERR] 下载内容为空"; exit 1; }
+head -1 .new | grep -q python || { echo "[ERR] 内容校验失败(非脚本)"; rm -f .new; exit 1; }
+grep -q "started v20260827" .new || { echo "[ERR] 新版指纹缺失(面板代码未更新?)"; rm -f .new; exit 1; }
+mv -f .new agent.py
+date "+%Y-%m-%d %H:%M:%S" > version.txt
+
+echo "==> [3/4] 重启服务加载新代码"
+restart_svc() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl restart lxcdeck-agent; sleep 2; systemctl is-active lxcdeck-agent 2>/dev/null
+  else
+    rc-service lxcdeck-agent restart; sleep 2; rc-service lxcdeck-agent status >/dev/null 2>&1
+  fi
+}
+if restart_svc; then
+  echo "==> [4/4] 完成"
+  echo "[OK] Agent 已升级 ($(cat version.txt)) v20260827"
+else
+  echo "[WARN] 新版启动失败，自动回滚旧版本"
+  mv -f agent.py.bak agent.py
+  if restart_svc; then
+    echo "[OK] 已回滚到旧版本，服务恢复"
+  else
+    echo "[ERR] 回滚后仍无法启动，请登录本机检查 systemctl status lxcdeck-agent"
+  fi
 fi
 '''
