@@ -488,7 +488,7 @@ def main():
             if fail % 10 == 1: log(f"offline: {e}; retrying...")
             time.sleep(min(2+fail, 10))
             continue
-        time.sleep(0.35 if PTY else 3)
+        time.sleep(0.18 if PTY else 3)
 
 if __name__ == "__main__":
     main()

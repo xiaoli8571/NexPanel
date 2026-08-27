@@ -1842,12 +1842,18 @@ function closeWS(){ if(wsRef){ try{ wsRef.close(); }catch(e){} wsRef=null; } }
 
 /* 迷你终端仿真器：字符网格 + 常用 ANSI/VT 序列 */
 class MiniTerm {
+  /* 行内容用单调递增 id 标记，html 渲染按 id 缓存：
+     只有真正变化的行才重新生成字符串/DOM —— 空闲时零渲染开销（移动端卡顿修复） */
   constructor(el, cols=120, rows=32){
     this.el = el; this.cols = cols; this.rows = rows;
     this.grid = []; this.cr = 0; this.cc = 0;
     this.fg = ""; this.bold = false;
     this.alt = null;
     for(let r=0;r<rows;r++) this.grid.push(new Array(cols).fill(null));
+    this.verSeq = 0;
+    this.rowVer = new Array(rows).fill(0);   // 行号 -> 内容 id
+    this._htmlMap = new Map();               // 内容 id -> 已渲染 html
+    this._dirtySet = null;                   // feed 过程中收集被写的行
   }
   resize(cols, rows){
     this.cols = cols; this.rows = rows;
@@ -1859,16 +1865,35 @@ class MiniTerm {
       ng.push(line);
     }
     this.grid = ng; this.cr = Math.min(this.cr, rows-1); this.cc = Math.min(this.cc, cols-1);
+    this._bumpAll();
   }
-  clear(){ for(let r=0;r<this.rows;r++) this.grid[r].fill(null); this.cr=0; this.cc=0; }
+  clear(){ for(let r=0;r<this.rows;r++) this.grid[r].fill(null); this.cr=0; this.cc=0; this._bumpAll(); }
+  _bumpAll(){
+    const v = ++this.verSeq;
+    this.rowVer = new Array(this.rows).fill(v);
+    if(this._htmlMap.size > 64) this._htmlMap.clear();   // 全量失效后旧缓存无保留价值
+  }
+  _touchDirty(){                        // feed 结束统一结算：每行只分配一个新 id
+    if(!this._dirtySet) return;
+    for(const r of this._dirtySet){
+      if(r>=0 && r<this.rows) this.rowVer[r] = ++this.verSeq;
+    }
+    this._dirtySet.clear();
+  }
   _put(ch){
     if(this.cc >= this.cols){ this.cc = 0; this._lf(); }
     if(this.cr >= this.rows) this.cr = this.rows-1;
+    if(!this._dirtySet) this._dirtySet = new Set();
+    this._dirtySet.add(this.cr);
     this.grid[this.cr][this.cc] = { ch, fg:this.fg, b:this.bold };
     this.cc++;
   }
   _lf(){
-    if(this.cr >= this.rows-1){ this.grid.shift(); this.grid.push(new Array(this.cols).fill(null)); }
+    if(this.cr >= this.rows-1){
+      // 屏幕滚动：网格与内容 id 数组同步上移，未变行仍能命中 id 缓存
+      this.grid.shift(); this.grid.push(new Array(this.cols).fill(null));
+      this.rowVer.shift(); this.rowVer.push(++this.verSeq);
+    }
     else this.cr++;
   }
   _sgr(ps){
@@ -1906,14 +1931,18 @@ class MiniTerm {
               this.cr = Math.min(this.rows-1, Math.max(0,(ps[0]||1)-1));
               this.cc = Math.min(this.cols-1, Math.max(0,(ps[1]||1)-1)); break;
             case "J":
+              if(!this._dirtySet) this._dirtySet = new Set();
               if(!ps[0]||ps[0]===0){ for(let c=this.cc;c<this.cols;c++) this.grid[this.cr][c]=null;
-                for(let r=this.cr+1;r<this.rows;r++) this.grid[r].fill(null); }
-              else { for(let r=0;r<this.rows;r++) this.grid[r].fill(null); }
+                this._dirtySet.add(this.cr);
+                for(let r=this.cr+1;r<this.rows;r++){ this.grid[r].fill(null); this._dirtySet.add(r); } }
+              else { for(let r=0;r<this.rows;r++) this.grid[r].fill(null); this._bumpAll(); }
               break;
             case "K":
+              if(!this._dirtySet) this._dirtySet = new Set();
               if(!ps[0]){ for(let c=this.cc;c<this.cols;c++) this.grid[this.cr][c]=null; }
               else if(ps[0]===1){ for(let c=0;c<=this.cc;c++) this.grid[this.cr][c]=null; }
               else this.grid[this.cr].fill(null);
+              this._dirtySet.add(this.cr);
               break;
             case "m": this._sgr(seq===""?[0]:ps); break;
             case "h": case "l":
@@ -1953,29 +1982,39 @@ class MiniTerm {
         i += width.length;
       }
     }
+    this._touchDirty();
   }
-  html(showCaret=false){
-    const out = [];
-    for(let r=0;r<this.rows;r++){
-      let line = "", run = "", cfg = "", cb = false;
-      const flush = ()=>{
-        if(run){
-          const style = cfg ? `color:${cfg}` : "";
-          line += (style||cb) ? `<span style="${style}${cb?";font-weight:600":""}">${run}</span>` : run;
-        }
-        run = "";
-      };
-      for(let c=0;c<this.cols;c++){
-        if(showCaret && r===this.cr && c===this.cc){ flush(); line += `<span class="t-caret"></span>`; }
-        const cell = this.grid[r][c];
-        const f = cell ? cell.fg : "", b = cell ? cell.b : false;
-        if(f!==cfg || b!==cb){ flush(); cfg=f; cb=b; }
-        run += (cell && cell.ch) ? esc(cell.ch) : "&nbsp;";
-        if(c === this.cols-1) flush();
+  /* 渲染一行（caretCol>=0 时在该列插入光标；带光标的行不进缓存） */
+  lineHTML(r, caretCol=-1){
+    const id = this.rowVer[r];
+    let cached;
+    if(caretCol < 0 && (cached = this._htmlMap.get(id)) !== undefined) return cached;
+    const row = this.grid[r];
+    const parts = [];
+    let run = "", cfg = "", cb = false;
+    const flush = ()=>{
+      if(run){
+        const style = cfg ? `color:${cfg}` : "";
+        parts.push((style||cb) ? `<span style="${style}${cb?";font-weight:600":""}">${run}</span>` : run);
       }
-      out.push(`<div class="t-line">${line}</div>`);
+      run = "";
+    };
+    for(let c=0;c<this.cols;c++){
+      if(c === caretCol){ flush(); parts.push(`<span class="t-caret"></span>`); }
+      const cell = row[c];
+      const f = cell ? cell.fg : "", b = cell ? cell.b : false;
+      if(f!==cfg || b!==cb){ flush(); cfg=f; cb=b; }
+      run += (cell && cell.ch) ? esc(cell.ch) : " ";
     }
-    return out.join("");
+    flush();
+    const html = parts.join("");
+    if(caretCol < 0){
+      this._htmlMap.set(id, html);
+      if(this._htmlMap.size > 512){               // 防止 id 无限增长
+        this._htmlMap.delete(this._htmlMap.keys().next().value);
+      }
+    }
+    return html;
   }
 }
 
@@ -1985,11 +2024,16 @@ function openTermModal(title, wsUrl, opts={}){
       ${icon("term",16)} ${esc(title)}</span>`,
     `<div class="term" id="term-out" style="overflow:auto"></div>
      <textarea id="term-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-       style="position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;outline:none;resize:none"></textarea>
+       style="position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;outline:none;resize:none;font-size:16px"></textarea>
      <p class="sub" style="color:var(--muted);font-size:11.5px;margin-top:8px">
        原始终端模式：支持 <code>Ctrl+C</code> / <code>Ctrl+L</code> / 方向键 / Tab 补全，
        可直接运行 <code>top</code> 等全屏程序。点击终端区域获取焦点（手机可唤起键盘）。</p>`,
-    null, "", { wide:true, onclose: ()=>{ closeWS(); clearInterval(repaint); window.removeEventListener("keydown", keyHandler, true); } });
+    null, "", { wide:true, onclose: ()=>{
+      closeWS(); clearInterval(repaint); clearTimeout(rsTimer);
+      window.removeEventListener("keydown", keyHandler, true);
+      window.removeEventListener("resize", onViewportResize);
+      if(window.visualViewport) window.visualViewport.removeEventListener("resize", onViewportResize);
+    } });
   ov.querySelector(".modal-foot").remove();
 
   const out = ov.querySelector("#term-out");
@@ -2001,6 +2045,18 @@ function openTermModal(title, wsUrl, opts={}){
 
   const term = new MiniTerm(out, 120, 32);
   let repaint = null;
+  let dirtyTerm = true;                 // 脏标记：仅内容变化时才重绘（空闲零开销）
+  let lineEls = [];                     // 每行一个 <div.t-line>，行级增量更新
+
+  const buildRows = ()=>{
+    out.textContent = ""; lineEls = [];
+    for(let r=0;r<term.rows;r++){
+      const d = document.createElement("div");
+      d.className = "t-line"; d._h = null;
+      out.appendChild(d); lineEls.push(d);
+    }
+  };
+  buildRows();
 
   const sendRaw = data =>{ if(wsRef && wsRef.readyState===1)
     wsRef.send(JSON.stringify({type:"input", data})); };
@@ -2008,7 +2064,10 @@ function openTermModal(title, wsUrl, opts={}){
     const cw = measure(), rect = out.getBoundingClientRect();
     const cols = Math.max(40, Math.min(500, Math.floor(rect.width/cw.w)));
     const rows = Math.max(8, Math.min(300, Math.floor(rect.height/cw.h)));
+    if(cols===term.cols && rows===term.rows) return;
     term.resize(cols, rows);
+    buildRows();                        // 行数变化 → 重建行元素
+    dirtyTerm = true;
     if(wsRef && wsRef.readyState===1)
       wsRef.send(JSON.stringify({type:"resize", cols, rows}));
   };
@@ -2023,13 +2082,29 @@ function openTermModal(title, wsUrl, opts={}){
     return {w, h};
   }
 
+  /* 只重绘变化的行：光标所在行每次重建（带 caret），其余按内容 id 命中缓存 */
   const paint = ()=>{
     if(!ov.isConnected){ clearInterval(repaint); return; }
+    if(!dirtyTerm || document.hidden) return;
+    dirtyTerm = false;
     const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 24;
-    out.innerHTML = term.html(true);
+    for(let r=0;r<term.rows;r++){
+      const h = (r===term.cr) ? term.lineHTML(r, term.cc) : term.lineHTML(r);
+      const el = lineEls[r];
+      if(el._h !== h){ el._h = h; el.innerHTML = h; }
+    }
     if(atBottom) out.scrollTop = out.scrollHeight;
   };
   repaint = setInterval(paint, 120);
+
+  // 视口变化（旋转/软键盘弹出）→ 防抖重新适配终端尺寸
+  let rsTimer = null;
+  const onViewportResize = ()=>{
+    clearTimeout(rsTimer);
+    rsTimer = setTimeout(()=>{ if(ov.isConnected){ doResize(); paint(); } }, 250);
+  };
+  window.addEventListener("resize", onViewportResize);
+  if(window.visualViewport) window.visualViewport.addEventListener("resize", onViewportResize);
 
   function keyHandler(e){
     if(wsRef !== ws || !ov.isConnected) return;
@@ -2086,16 +2161,17 @@ function openTermModal(title, wsUrl, opts={}){
   const proto = location.protocol==="https:"?"wss":"ws";
   const ws = new WebSocket(`${proto}://${location.host}${wsUrl}`);
   wsRef = ws;
-  ws.onopen = ()=>{ input.focus(); doResize(); paint(); };
+  ws.onopen = ()=>{ input.focus(); doResize(); dirtyTerm = true; paint(); };
   ws.onmessage = ev=>{
     let m; try{ m = JSON.parse(ev.data); }catch(_){ return; }
-    if(m.type === "out") term.feed(m.text);
-    else if(m.type === "clear") term.clear();
-    else if(m.type === "closed") term.feed("\r\n\x1b[33m— 连接已断开 —\x1b[0m\r\n");
+    if(m.type === "out"){ term.feed(m.text); dirtyTerm = true; }
+    else if(m.type === "clear"){ term.clear(); dirtyTerm = true; }
+    else if(m.type === "closed"){ term.feed("\r\n\x1b[33m— 连接已断开 —\x1b[0m\r\n"); dirtyTerm = true; }
   };
   ws.onclose = ()=>{
     if(wsRef === ws) wsRef = null;
     term.feed("\r\n\x1b[33m— 会话结束 —\x1b[0m\r\n");
+    dirtyTerm = true;
   };
   return ov;
 }

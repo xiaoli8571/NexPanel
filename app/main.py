@@ -116,6 +116,7 @@ async def _ssh_terminal(ws: WebSocket, node: dict, c: dict | None = None):
     async def pump():
         """远端 → 浏览器（recv 超时属正常轮询，不视为断开）"""
         import socket as _s
+        loop = asyncio.get_running_loop()
         while not closed["v"]:
             try:
                 data = await asyncio.to_thread(chan.recv, 4096)
@@ -125,7 +126,16 @@ async def _ssh_terminal(ws: WebSocket, node: dict, c: dict | None = None):
                 break
             if not data:
                 break
-            text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+            # 聚合已到达的后续字节（≤16 块 / 10ms 窗口）：
+            # 大量输出时大幅减少 WS 消息数量，单键回显几乎不受影响
+            chunks = [data] if isinstance(data, bytes) else [str(data).encode()]
+            try:
+                deadline = loop.time() + 0.01
+                while len(chunks) < 16 and chan.recv_ready() and loop.time() < deadline:
+                    chunks.append(await asyncio.to_thread(chan.recv, 4096))
+            except Exception:
+                pass
+            text = b"".join(chunks).decode("utf-8", errors="replace")
             try:
                 await ws.send_text(json.dumps({"type": "out", "text": text},
                                               ensure_ascii=False))
