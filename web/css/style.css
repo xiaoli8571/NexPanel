@@ -1,4 +1,5 @@
 /* ══════════════ LXC Deck · 深色主题 ══════════════ */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 :root{
   --bg:#0b0f17;
   --bg-soft:#0f1523;
@@ -203,7 +204,8 @@ tbody tr:last-child td{border-bottom:none}
 /* ─────────── 终端 ─────────── */
 .term{
   height:min(420px,56vh);overflow-y:auto;background:#05080d;border-radius:10px;border:1px solid #1d2740;
-  padding:12px 14px;font-family:var(--mono);font-size:12.8px;line-height:1.55;cursor:text}
+  padding:12px 14px;font-family:var(--mono);font-size:12.8px;line-height:1.55;cursor:text;
+  touch-action:manipulation;-webkit-user-select:text;user-select:text}
 .t-line{white-space:pre-wrap;word-break:break-all;color:#c7d4e6}
 .t-prompt{color:#34d399;font-weight:600}
 .t-banner{color:#67e8f9}

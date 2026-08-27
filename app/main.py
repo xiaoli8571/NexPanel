@@ -296,4 +296,12 @@ async def ws_catchall(ws: WebSocket, path: str):
 
 
 # ────────────── 静态前端(置于 API 之后) ──────────────
+@app.get("/", include_in_schema=False)
+async def _index():
+    """根路径显式返回 index.html 并禁缓存：
+    保证移动端浏览器总能立刻拿到新版 HTML（从而引用最新 ?v= 资源），
+    避免「改了代码手机还是旧行为」的缓存假象"""
+    from fastapi.responses import FileResponse
+    return FileResponse(config.WEB_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 app.mount("/", StaticFiles(directory=str(config.WEB_DIR), html=True), name="web")
