@@ -921,6 +921,107 @@ def sub_reset(request: Request, admin: dict = Depends(require_admin)):
     return {"ok": True, "token": tok, "url": f"{base}/api/sub/{tok}"}
 
 
+# ────────────────────────── 订阅转换（外部机场导入 / Clash ↔ V2Ray 互转） ──────────────────────────
+class ConvIn(BaseModel):
+    name: str = ""
+    url: str = ""
+    content: str = ""
+
+
+class ConvPreviewIn(BaseModel):
+    content: str
+
+
+@router.get("/conv/sources")
+def conv_sources(request: Request, user: dict = Depends(current_user)):
+    """列出所有外部订阅转换源，附公开 Clash/V2Ray 链接"""
+    from . import subconv as sc
+    base = _panel_base(request)
+    out = []
+    for s in sc.list_sources():
+        s["clash_url"] = f"{base}/api/conv/{s['token']}/clash"
+        s["v2ray_url"] = f"{base}/api/conv/{s['token']}/v2ray"
+        out.append(s)
+    return out
+
+
+@router.post("/conv/sources")
+def conv_add(body: ConvIn, request: Request, user: dict = Depends(current_user)):
+    """新增外部订阅：url（机场订阅链接）或 content（直接粘贴订阅内容）"""
+    if not body.url.strip() and not body.content.strip():
+        raise HTTPException(400, "url 和 content 至少填一个")
+    from . import subconv as sc
+    try:
+        s = sc.add_source(body.name.strip(), body.url.strip(), body.content.strip())
+    except Exception as e:
+        raise HTTPException(400, f"添加失败: {e}")
+    base = _panel_base(request)
+    s["clash_url"] = f"{base}/api/conv/{s['token']}/clash"
+    s["v2ray_url"] = f"{base}/api/conv/{s['token']}/v2ray"
+    return s
+
+
+@router.delete("/conv/sources/{sid}")
+def conv_delete(sid: int, user: dict = Depends(current_user)):
+    from . import subconv as sc
+    sc.delete_source(sid)
+    return {"ok": True}
+
+
+@router.post("/conv/sources/{sid}/refresh")
+def conv_refresh(sid: int, request: Request, user: dict = Depends(current_user)):
+    from . import subconv as sc
+    try:
+        s = sc.refresh_source(sid)
+    except KeyError:
+        raise HTTPException(404, "订阅不存在")
+    base = _panel_base(request)
+    s["clash_url"] = f"{base}/api/conv/{s['token']}/clash"
+    s["v2ray_url"] = f"{base}/api/conv/{s['token']}/v2ray"
+    return s
+
+
+@router.post("/conv/preview")
+def conv_preview(body: ConvPreviewIn, user: dict = Depends(current_user)):
+    """直接粘贴订阅文本，返回解析出的节点预览（不保存）"""
+    from . import subconv as sc
+    nodes = sc.parse_subscription_text(body.content)
+    return {
+        "node_count": len(nodes),
+        "names": [n.get("name", "") for n in nodes[:60]],
+        "clash": sc.build_clash_yaml(nodes, "NexPanel 转换预览")[:2000],
+        "uris": [sc.to_uri(n) for n in nodes[:30]],
+    }
+
+
+@router.get("/conv/{token}/clash")
+def conv_clash(token: str, request: _Req):
+    """公开 Clash 订阅地址（随机 token 鉴权，无需登录）"""
+    from fastapi.responses import PlainTextResponse
+    from . import subconv as sc
+    row = sc.get_source_by_token(token)
+    if not row:
+        raise HTTPException(404, "Not found")
+    nodes = sc.node_uris(token, by_token=True)
+    body = sc.build_clash_yaml(nodes, row["name"] or "NexPanel 转换")
+    return PlainTextResponse(body, media_type="text/yaml; charset=utf-8",
+                             headers={"Cache-Control": "no-store"})
+
+
+@router.get("/conv/{token}/v2ray")
+def conv_v2ray(token: str, request: _Req):
+    """公开 Base64 URI 订阅地址（v2rayNG / Shadowrocket / NekoBox 等）"""
+    from fastapi.responses import PlainTextResponse
+    from . import subconv as sc
+    row = sc.get_source_by_token(token)
+    if not row:
+        raise HTTPException(404, "Not found")
+    nodes = sc.node_uris(token, by_token=True)
+    body = sc.build_base64_uri(nodes)
+    return PlainTextResponse(body, media_type="text/plain; charset=utf-8",
+                             headers={"Cache-Control": "no-store"})
+
+
 # ────────────────────────── 探针监控 ──────────────────────────
 @router.get("/probes")
 def probes(user: dict = Depends(current_user)):

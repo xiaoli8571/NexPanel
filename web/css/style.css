@@ -292,3 +292,14 @@ html.light .t-line{color:#243044}
 html.light .t-caret{background:var(--accent)}
 /* 节点/探针 logo 方块（JS 内联深色底，这里强制翻面） */
 html.light .tpl-logo{background:#eef1f8!important;color:#475569!important;border:1px solid var(--line-strong)}
+
+/* ─────────── 已部署节点：按机器分组折叠 ─────────── */
+.machine-group{border:1px solid var(--line);border-radius:10px;margin-bottom:8px;background:var(--panel-2);overflow:hidden}
+.machine-group summary{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;list-style:none;font-size:13px;user-select:none;transition:.15s}
+.machine-group summary::-webkit-details-marker{display:none}
+.machine-group summary:hover{background:rgba(148,163,184,.06)}
+.machine-group[open] summary{border-bottom:1px solid var(--line)}
+.machine-group .mg-title{display:inline-flex;align-items:center;gap:6px;font-weight:600}
+.machine-group .mg-count{flex:none}
+.machine-group .mg-chevron{margin-left:auto;color:var(--muted);font-size:11px}
+.machine-group .table-wrap{overflow-x:auto}

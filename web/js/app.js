@@ -1037,11 +1037,10 @@ async function viewApps(){
           <select id="machine-filter" class="select" style="margin-left:auto;width:auto;max-width:240px">
             <option value="all">全部机器</option>
           </select>
+          <button class="btn sm ghost" id="btn-toggle-apps" title="展开/收起全部机器分组">展开全部</button>
           <button class="btn sm" id="btn-sync-machine" title="按机器合并重建 sing-box 配置，修复协议不通/互相覆盖">🔄 同步配置</button>
         </h4>
-        <div class="table-wrap" style="margin-top:8px"><table>
-          <thead><tr><th>机器</th><th>协议</th><th>端口</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody id="apps-body"></tbody></table></div>
+        <div id="apps-container" style="margin-top:8px"></div>
       </div>
     </div>
   </div>
@@ -1173,18 +1172,19 @@ async function loadApps(){
     }
     const selected = sel ? sel.value : "all";
 
-    const rows = [];
+    const isAll = selected === "all";
+    const groups = new Map();
     list.forEach(a=>{
       const mkey = a.container_id ? `c-${a.container_id}` : `h-${a.node_id}`;
-      if(selected !== "all" && mkey !== selected) return;
+      if(!isAll && mkey !== selected) return;
       const machineName = a.container_id ? (a.container || a.name || "容器") : (a.node_name || a.name || "主机");
-      const isHost = !a.container_id;
+      if(!groups.has(mkey)) groups.set(mkey, {name:machineName, rows:[]});
+      const rows = groups.get(mkey).rows;
       (a.spec || []).forEach((s,i)=>{
         const link = (a.links || [])[i] || "";
         const proto = s.protocol || s.type || "?";
         const port = s.port || "";
         rows.push(`<tr>
-          <td><b>${esc(machineName)}</b>${isHost?` <span class="tag">主机</span>`:` <span class="tag">LXC</span>`}</td>
           <td><span class="tag">${esc(proto)}</span></td>
           <td class="mono">${port}</td>
           <td><span class="badge running"><span class="dot"></span>运行中</span></td>
@@ -1195,7 +1195,33 @@ async function loadApps(){
           </div></td></tr>`);
       });
     });
-    $("#apps-body").innerHTML = rows.join("") || `<tr><td colspan="5" class="empty">暂无部署记录</td></tr>`;
+    let appsHtml = "";
+    for(const [mkey, g] of groups){
+      const open = !isAll;
+      appsHtml += `<details class="machine-group" ${open?"open":""} data-mkey="${mkey}">
+        <summary>
+          <span class="mg-title">${icon("server",14)} ${esc(g.name)}</span>
+          <span class="tag mg-count">${g.rows.length} 节点</span>
+          <span class="spacer"></span>
+          <span class="mg-chevron">${open?"▾":"▸"}</span>
+        </summary>
+        <div class="table-wrap"><table>
+          <thead><tr><th>协议</th><th>端口</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>${g.rows.join("")}</tbody>
+        </table></div>
+      </details>`;
+    }
+    $("#apps-container").innerHTML = appsHtml || `<div class="empty">暂无部署记录</div>`;
+    const btnToggle = $("#btn-toggle-apps");
+    if(btnToggle){
+      btnToggle.textContent = isAll ? "展开全部" : "收起全部";
+      btnToggle.onclick = ()=>{
+        const all = $$("#apps-container details.machine-group");
+        const anyOpen = [...all].some(d=>d.open);
+        all.forEach(d=>{ d.open = !anyOpen; d.querySelector(".mg-chevron").textContent = d.open?"▾":"▸"; });
+        btnToggle.textContent = anyOpen ? "展开全部" : "收起全部";
+      };
+    }
 
     if(sel) sel.onchange = loadApps;
 
@@ -1223,7 +1249,7 @@ async function loadApps(){
       }catch(e){ toast(e.message,"err",5000); }
     };
 
-    $$("#apps-body [data-del-node]").forEach(b=>b.onclick=async()=>{
+    $$("#apps-container [data-del-node]").forEach(b=>b.onclick=async()=>{
       const appId = +b.dataset.delNode, idx = +b.dataset.idx;
       if(!(await confirmModal("删除该单个代理节点？将重新生成 sing-box 配置并重启，只移除这一个节点。", true))) return;
       try{
@@ -1233,7 +1259,7 @@ async function loadApps(){
       }catch(e){ toast(e.message,"err"); }
     });
 
-    $$("#apps-body [data-del-app]").forEach(b=>b.onclick=async()=>{
+    $$("#apps-container [data-del-app]").forEach(b=>b.onclick=async()=>{
       if(!(await confirmModal("删除整组应用？将停止 sing-box 并移除全部端口映射。",true))) return;
       try{ await api(`/apps/${b.dataset.delApp}`,{method:"DELETE"}); toast("整组已删除","ok"); loadApps(); }
       catch(e){ toast(e.message,"err"); }
@@ -1621,6 +1647,18 @@ async function viewSettings(){
     </div>
     ` : ""}
     ${isAdmin ? `
+    <div class="card"><h4><span class="dot" style="background:#38bdf8"></span>🔁 订阅转换</h4>
+      <p style="color:var(--muted);font-size:12.5px;margin-bottom:10px">导入其他机场/面板的订阅，自动转成 Clash / V2Ray 订阅地址，直接填进客户端即可。</p>
+      <div id="subconv-list" style="display:flex;flex-direction:column;gap:10px"></div>
+      <div class="form-grid" style="grid-template-columns:1fr 2fr;margin-top:12px">
+        <input class="input" id="subconv-name" placeholder="名称（如 机场A）">
+        <input class="input" id="subconv-url" placeholder="https://机场订阅链接（粘贴多行节点内容也行）">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn primary" id="btn-subconv-add">＋ 导入</button>
+        <button class="btn ghost" id="btn-subconv-preview">粘贴内容预览（不保存）</button>
+      </div>
+    </div>
     <div class="card" style="border-color:rgba(239,68,68,.35)">
       <h4><span class="dot" style="background:var(--err)"></span>危险操作</h4>
       <p style="color:var(--muted);font-size:12.5px;margin-bottom:14px">
@@ -1723,6 +1761,66 @@ async function viewSettings(){
       btn.disabled = false; btn.textContent = "↩ 恢复备份";
       bkRestoreFile.value = "";
     };
+  }
+
+
+  // 订阅转换
+  const subconvList = $("#subconv-list");
+  if(subconvList){
+    const loadSubConv = async ()=>{
+      try{
+        const list = await api("/conv/sources");
+        subconvList.innerHTML = list.length ? list.map(s=>`
+          <div style="display:flex;flex-direction:column;gap:6px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <b>${esc(s.name)}</b>
+              <span class="tag">${s.node_count} 节点</span>
+              ${s.error?`<span style="color:var(--err);font-size:12px">${esc(s.error)}</span>`:""}
+              <span class="spacer"></span>
+              <button class="btn sm ghost" data-subconv-refresh="${s.id}">${icon("rotate",12)} 刷新</button>
+              <button class="btn sm warn" data-subconv-del="${s.id}">${icon("trash",12)} 删除</button>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+              <input class="input mono" readonly value="${esc(s.clash_url)}" onclick="this.select()" style="flex:1;min-width:170px;font-size:12px">
+              <button class="btn sm" data-copy="${esc(s.clash_url)}">复制 Clash</button>
+              <input class="input mono" readonly value="${esc(s.v2ray_url)}" onclick="this.select()" style="flex:1;min-width:170px;font-size:12px">
+              <button class="btn sm" data-copy="${esc(s.v2ray_url)}">复制 V2Ray</button>
+            </div>
+          </div>`).join("") : `<span class="empty">还没有订阅源，贴一个机场链接或点“粘贴内容预览”</span>`;
+        subconvList.querySelectorAll("[data-subconv-refresh]").forEach(b=>b.onclick=async ()=>{
+          try{ await api(`/conv/sources/${b.dataset.subconvRefresh}/refresh`,{method:"POST"}); toast("已刷新","ok"); loadSubConv(); }catch(e){ toast(e.message,"err"); }
+        });
+        subconvList.querySelectorAll("[data-subconv-del]").forEach(b=>b.onclick=async ()=>{
+          if(!(await confirmModal("删除该订阅源？转换链接将立即失效。",true))) return;
+          try{ await api(`/conv/sources/${b.dataset.subconvDel}`,{method:"DELETE"}); toast("已删除","ok"); loadSubConv(); }catch(e){ toast(e.message,"err"); }
+        });
+        subconvList.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>copyText(b.dataset.copy));
+      }catch(e){}
+    };
+    $("#btn-subconv-add").onclick = async ()=>{
+      const name=$("#subconv-name").value.trim();
+      const url=$("#subconv-url").value.trim();
+      if(!name && !url) return toast("请填名称或订阅链接","err");
+      try{
+        const r = await api("/conv/sources",{method:"POST",body:{name,url,content:""}});
+        if(r.node_count) toast(`导入成功：${r.node_count} 个节点`,"ok",4000);
+        else toast(r.error||"未解析到节点","err",5000);
+        $("#subconv-name").value=""; $("#subconv-url").value="";
+        loadSubConv();
+      }catch(e){ toast(e.message,"err"); }
+    };
+    $("#btn-subconv-preview").onclick = async ()=>{
+      const content=$("#subconv-url").value.trim();
+      if(!content) return toast("请先在上面的输入框粘贴订阅内容或链接","err");
+      try{
+        const r = await api("/conv/preview",{method:"POST",body:{content}});
+        openModal("订阅解析预览", `
+          <p>识别到 <b>${r.node_count}</b> 个节点</p>
+          <div class="term" style="height:auto;max-height:280px;overflow:auto;font-size:12px">${(r.names||[]).map(x=>`<div>· ${esc(x)}</div>`).join("")||'<div style="color:var(--muted)">暂无</div>'}</div>
+          <p style="color:var(--muted);font-size:11.5px;margin-top:8px">这是临时预览，不保存。确认可用后点「导入」即可生成 Clash / V2Ray 订阅链接。</p>`, closeModal, "关闭");
+      }catch(e){ toast(e.message,"err"); }
+    };
+    loadSubConv();
   }
 
   const rd = $("#reset-demo");
