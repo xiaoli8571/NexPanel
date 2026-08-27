@@ -627,12 +627,18 @@ grep -q "started v20260827" .new || { echo "[ERR] 新版指纹缺失(面板代�
 mv -f .new agent.py
 date "+%Y-%m-%d %H:%M:%S" > version.txt
 
-echo "==> [3/4] 重启服务加载新代码"
+echo "==> [3/4] 重启服务加载新代码（setsid 独立会话，防止 stop 连带杀死本脚本）"
 restart_svc() {
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart lxcdeck-agent; sleep 2; systemctl is-active lxcdeck-agent 2>/dev/null
+    setsid sh -c 'systemctl restart lxcdeck-agent' >/dev/null 2>&1
   else
-    rc-service lxcdeck-agent restart; sleep 2; rc-service lxcdeck-agent status >/dev/null 2>&1
+    setsid sh -c 'rc-service lxcdeck-agent restart' >/dev/null 2>&1
+  fi
+  sleep 3
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl is-active lxcdeck-agent 2>/dev/null
+  else
+    rc-service lxcdeck-agent status >/dev/null 2>&1 && echo active
   fi
 }
 if restart_svc; then
