@@ -2227,7 +2227,12 @@ function openTermModal(title, wsUrl, opts={}){
     else if(k === "Delete") data = "\x1b[3~";
     else if(k === "PageUp") data = "\x1b[5~";
     else if(k === "PageDown") data = "\x1b[6~";
-    else if(e.ctrlKey && !e.altKey && k.length===1){
+    else if(e.ctrlKey && !e.altKey && !e.metaKey && k.length===1){
+      const key = k.toLowerCase();
+      // Ctrl+V：不拦截，交给浏览器默认粘贴（textarea 的 input 事件会把内容发给终端）
+      if(key === "v") return;
+      // Ctrl+C：终端里有选中文本时走浏览器复制；没有选中才发送中断信号
+      if(key === "c" && window.getSelection && window.getSelection().toString()) return;
       const c = k.toUpperCase().charCodeAt(0)-64;
       if(c > 0 && c < 27) data = String.fromCharCode(c);
     }
