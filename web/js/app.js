@@ -2232,7 +2232,11 @@ function openTermModal(title, wsUrl, opts={}){
       // Ctrl+V：不拦截，交给浏览器默认粘贴（textarea 的 input 事件会把内容发给终端）
       if(key === "v") return;
       // Ctrl+C：终端里有选中文本时走浏览器复制；没有选中才发送中断信号
-      if(key === "c" && window.getSelection && window.getSelection().toString()) return;
+      if(key === "c" && window.getSelection && window.getSelection().toString()){
+        e.preventDefault(); e.stopPropagation();
+        try{ document.execCommand("copy"); }catch(_){}
+        return;
+      }
       const c = k.toUpperCase().charCodeAt(0)-64;
       if(c > 0 && c < 27) data = String.fromCharCode(c);
     }
@@ -2264,7 +2268,11 @@ function openTermModal(title, wsUrl, opts={}){
   input.addEventListener("keydown", keyHandler);
 
   window.addEventListener("keydown", keyHandler, true);
-  out.addEventListener("click", ()=>{ input.focus(); });
+  out.addEventListener("click", ()=>{
+    // 终端里有选中的文字时先不抢焦点，方便 Ctrl+C 复制；再次点击才进入输入
+    if(window.getSelection && window.getSelection().toString()) return;
+    input.focus();
+  });
 
   const proto = location.protocol==="https:"?"wss":"ws";
   const ws = new WebSocket(`${proto}://${location.host}${wsUrl}`);
