@@ -259,12 +259,67 @@ def test_node_body(body: NodeIn, admin: dict = Depends(require_admin)):
         raise HTTPException(400, f"连接失败: {e}")
 
 
+# ┊ 节点探测脚本（Agent 命令通道用）：真实 OS / 主机名 / LXC 版本 ┊
+NODE_PROBE_SH = (
+    '. /etc/os-release 2>/dev/null; echo "OS|${PRETTY_NAME:-Linux}"; '
+    'echo "HOST|$(hostname 2>/dev/null)"; '
+    'V="$(lxc-start --version 2>/dev/null || true)"; echo "LXC|${V:-none}"'
+)
+
+
 @router.post("/nodes/{nid}/probe")
-def probe_node(nid: int, admin: dict = Depends(require_admin)):
-    """对已保存节点做连接探测并更新状态"""
+async def probe_node(nid: int, admin: dict = Depends(require_admin)):
+    """对已保存节点做连接探测并更新状态
+    · agent：心跳缓存取真实系统信息 + 命令通道查 LXC 安装状态
+    · ssh：SSH 直连探测
+    · demo：演示节点（模拟数据），如实标注
+    """
+    import asyncio as _aio
     node = _get_node(nid)
-    if node["kind"] != "ssh":
-        return {"ok": True, "os": "Demo Runtime", "lxc_installed": True}
+
+    # ┊ 演示节点：本身就是模拟数据，不再伪装成真实检测结果 ┊
+    if node["kind"] == "demo":
+        return {"ok": True, "hostname": node["name"], "os": "演示节点（模拟数据）",
+                "lxc_installed": True, "lxc_version": "", "demo": True}
+
+    # ┊ Agent 节点：真实检测 ┊
+    if node["kind"] == "agent":
+        if not agent_mod.is_online(nid):
+            db.ex("UPDATE nodes SET status='offline' WHERE id=?", (nid,))
+            raise HTTPException(400, "Agent 离线，无法测试")
+        cache = monitor.get_cache(nid) or {}
+        host = cache.get("host") or {}
+        info = {"ok": True,
+                "os": host.get("os") or node["os_info"] or "Linux",
+                "kernel": host.get("kernel") or "",
+                "hostname": host.get("hostname") or node["name"],
+                "lxc_installed": False, "lxc_version": ""}
+        # 命令通道查 LXC（探针类 agent 也支持 exec；失败则降级用已记录的 lxc_ok）
+        res = None
+        try:
+            cid = agent_mod.queue_exec(nid, NODE_PROBE_SH, timeout=30)
+            res = await _aio.to_thread(agent_mod.wait_result, cid, 35)
+        except Exception:
+            res = None
+        if res and (res.get("out") or "").startswith("OS|"):
+            for line in (res["out"] or "").splitlines():
+                p = line.split("|", 1)
+                if line.startswith("OS|") and len(p) > 1 and p[1].strip():
+                    info["os"] = p[1].strip()
+                elif line.startswith("HOST|") and len(p) > 1 and p[1].strip():
+                    info["hostname"] = p[1].strip()
+                elif line.startswith("LXC|") and len(p) > 1:
+                    ver = p[1].strip()
+                    info["lxc_installed"] = ver not in ("", "none")
+                    info["lxc_version"] = "" if ver == "none" else ver
+        else:
+            info["lxc_installed"] = bool(node["lxc_ok"])
+        status = "online" if info["lxc_installed"] else "nolxc"
+        db.ex("UPDATE nodes SET status=?, lxc_ok=?, os_info=? WHERE id=?",
+              (status, int(info["lxc_installed"]), info["os"], nid))
+        return info
+
+    # ┊ SSH 节点：SSH 直连检测 ┊
     try:
         info = nodes_mod.test_node(node)
         status = "online" if info["lxc_installed"] else "nolxc"

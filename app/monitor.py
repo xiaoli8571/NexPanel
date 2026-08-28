@@ -220,7 +220,8 @@ def summary_of(node_row: dict) -> dict:
             "status": status,
             "error": entry.get("error", ""),
             "os_info": host.get("os") or node_row["os_info"] or "",
-            "lxc_ok": (agent_ok and bool(host)) if is_agent else
+            # agent：真实安装状态以「测试」探测落库的 lxc_ok 为准（在线≠已装LXC）
+            "lxc_ok": (agent_ok and bool(node_row["lxc_ok"])) if is_agent else
                       (bool(host) and entry.get("status") == "online"),
             "live": {"cpu_pct": host.get("cpu_pct", 0.0),
                      "mem_total_mb": host.get("mem_total_mb", 0),

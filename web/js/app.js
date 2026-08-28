@@ -491,7 +491,11 @@ async function viewNodes(){
       $$("#node-grid [data-probe]").forEach(b=>b.onclick=async()=>{
         b.disabled=true; b.textContent="测试中…";
         try{ const r=await api(`/nodes/${b.dataset.probe}/probe`,{method:"POST"});
-          toast(`✓ ${r.hostname||""} · ${r.os} · LXC ${r.lxc_installed?("已安装 "+(r.lxc_version||"")):"未安装"}`,"ok",4200);
+          if(r.demo){ toast(`ℹ️ ${r.hostname||""} · ${r.os}`,"info",4200); }
+          else{
+            const lxcTxt = r.lxc_installed?("已安装"+(r.lxc_version?(" "+r.lxc_version):"")):"未安装（未装母机的机器可点「⚡ 安装 LXC」）";
+            toast(`✓ ${r.hostname||""} · ${r.os} · LXC ${lxcTxt}`,"ok",4200);
+          }
         }catch(e){ toast(e.message,"err",4200); }
         render();
       });
