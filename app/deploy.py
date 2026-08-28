@@ -713,6 +713,8 @@ async def remove_app(app_id: int, user: dict, ip: str):
 
 async def remove_single_node(app_id: int, index: int, user: dict, ip: str):
     """删除某个应用(8合1/单协议)中的单个代理节点：更新配置 → 重启 sing-box → 移除DNAT → 更新DB"""
+    if isinstance(user, str):
+        user = {"sub": user}  # 兼容误传 sub 字符串的调用方
     a = db.one("SELECT * FROM apps WHERE id=?", (app_id,))
     if not a:
         raise ValueError("应用不存在")

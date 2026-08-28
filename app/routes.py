@@ -797,8 +797,10 @@ async def del_single_node(app_id: int, index: int, request: Request,
                           admin: dict = Depends(require_admin)):
     """删除某个应用中的单个代理节点（更新 sing-box 配置并移除端口映射）"""
     try:
+        # 传完整 user 字典（remove_single_node 内部 audit 需要 user["sub"]；
+        # 此前误传 admin["sub"] 字符串导致删除后 500）
         return await deploy_mod.remove_single_node(
-            app_id, index, admin["sub"], request.client.host)
+            app_id, index, admin, request.client.host)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
