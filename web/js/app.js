@@ -1283,6 +1283,7 @@ async function loadApps(){
 window.openSubModal = async function(){
   try{
     const info = await api("/apps/sub-info");
+    const tr = info.traffic || {};
     const ov = openModal(`🔗 订阅中心`, `
       <p style="color:var(--muted);font-size:12.5px;line-height:1.7;margin-bottom:10px">
         将以下<b>一个订阅链接</b>导入任意客户端即可自动同步面板下发的全部节点（当前 <b>${info.nodes}</b> 个）。
@@ -1290,6 +1291,16 @@ window.openSubModal = async function(){
       <label style="display:block;font-size:12px;color:var(--muted)">统一订阅链接（所有客户端通用）</label>
       <div class="term" style="height:auto;padding:12px;user-select:all;word-break:break-all" id="sub-url-box">${esc(info.url)}</div>
       <button class="btn sm block" style="margin-top:8px" onclick="copyText(document.getElementById('sub-url-box').textContent)">📋 复制订阅链接</button>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)">
+        <label style="display:block;font-size:12px;color:var(--muted)">♻️ 流量显示（Clash 等客户端的「流量使用情况」）</label>
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+          <input class="input" id="sub-tr-rem" type="number" min="0" step="0.1" placeholder="剩余流量 GB（留空=9999G）" style="flex:1;min-width:150px" value="${tr.remaining_gb ?? ""}">
+          <input class="input" id="sub-tr-exp" type="date" style="width:150px" value="${esc(tr.expire || "")}" title="到期时间（可选）">
+          <button class="btn primary sm" id="btn-sub-tr-save">保存</button>
+          <button class="btn ghost sm" id="btn-sub-tr-clear">重置</button>
+        </div>
+        <p style="color:var(--muted);font-size:11px;margin-top:4px;line-height:1.6">手动填了剩余流量则客户端显示 0 / 剩余值；留空显示 0 / 9999 GB。「重置」= 清除手动设定。</p>
+      </div>
       <p style="color:var(--muted);font-size:11.5px;margin-top:12px;line-height:1.7">
         · 新部署节点后客户端刷新订阅即可拉取<br>
         · Token 泄露时可重置，旧链接立即失效<br></p>
@@ -1301,6 +1312,21 @@ window.openSubModal = async function(){
       try{
         const r = await api("/apps/sub-reset",{method:"POST"});
         closeModal(); toast("订阅令牌已重置","ok"); openSubModal();
+      }catch(e){ toast(e.message,"err"); }
+    };
+    ov.querySelector("#btn-sub-tr-save").onclick = async ()=>{
+      const rem = ov.querySelector("#sub-tr-rem").value.trim();
+      const exp = ov.querySelector("#sub-tr-exp").value;
+      try{
+        await api("/apps/sub-traffic",{method:"POST",body:{remaining_gb: rem===""?null:parseFloat(rem), expire: exp}});
+        toast("流量显示已保存","ok");
+      }catch(e){ toast(e.message,"err"); }
+    };
+    ov.querySelector("#btn-sub-tr-clear").onclick = async ()=>{
+      try{
+        await api("/apps/sub-traffic",{method:"POST",body:{remaining_gb:null,expire:""}});
+        ov.querySelector("#sub-tr-rem").value=""; ov.querySelector("#sub-tr-exp").value="";
+        toast("已清除手动设定（显示 9999G）","ok");
       }catch(e){ toast(e.message,"err"); }
     };
   }catch(e){ toast(e.message,"err"); }
@@ -1782,13 +1808,19 @@ async function viewSettings(){
     const loadSubConv = async ()=>{
       try{
         const list = await api("/conv/sources");
+        const trTag = s => s.userinfo_remaining!=null
+          ? `<span class="tag">♻️ 剩余 ${s.userinfo_remaining}G</span>`
+          : ((s.upstream_userinfo||"").includes("total=") ? `<span class="tag">📊 上游流量</span>` : `<span class="tag">📊 9999G</span>`);
         subconvList.innerHTML = list.length ? list.map(s=>`
           <div style="display:flex;flex-direction:column;gap:6px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px">
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <b>${esc(s.name)}</b>
               <span class="tag">${s.node_count} 节点</span>
+              ${trTag(s)}
+              ${s.userinfo_expire?`<span class="tag">📅 ${esc(s.userinfo_expire)}</span>`:""}
               ${s.error?`<span style="color:var(--err);font-size:12px">${esc(s.error)}</span>`:""}
               <span class="spacer"></span>
+              <button class="btn sm ghost" data-subconv-traffic="${s.id}" data-rem="${s.userinfo_remaining ?? ""}" data-exp="${esc(s.userinfo_expire || "")}">📊 流量</button>
               <button class="btn sm ghost" data-subconv-refresh="${s.id}">${icon("rotate",12)} 刷新</button>
               <button class="btn sm warn" data-subconv-del="${s.id}">${icon("trash",12)} 删除</button>
             </div>
@@ -1799,6 +1831,17 @@ async function viewSettings(){
               <button class="btn sm" data-copy="${esc(s.v2ray_url)}">复制 V2Ray</button>
             </div>
           </div>`).join("") : `<span class="empty">还没有订阅源，贴一个机场链接或点“粘贴内容预览”</span>`;
+        subconvList.querySelectorAll("[data-subconv-traffic]").forEach(b=>b.onclick=async ()=>{
+          const id=b.dataset.subconvTraffic;
+          const rem=prompt("剩余流量（GB）\n留空 = 显示 9999G，输入后客户端显示 0 / 该值：", b.dataset.rem||"");
+          if(rem===null) return;
+          const exp=prompt("到期日期 YYYY-MM-DD（可选，留空 = 不显示）：", b.dataset.exp||"");
+          if(exp===null) return;
+          try{
+            await api(`/conv/sources/${id}/traffic`,{method:"POST",body:{remaining_gb: rem.trim()===""?null:parseFloat(rem), expire: exp.trim()}});
+            toast("流量显示已保存","ok"); loadSubConv();
+          }catch(e){ toast(e.message,"err"); }
+        });
         subconvList.querySelectorAll("[data-subconv-refresh]").forEach(b=>b.onclick=async ()=>{
           try{ await api(`/conv/sources/${b.dataset.subconvRefresh}/refresh`,{method:"POST"}); toast("已刷新","ok"); loadSubConv(); }catch(e){ toast(e.message,"err"); }
         });

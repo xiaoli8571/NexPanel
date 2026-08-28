@@ -892,7 +892,8 @@ def subscription(token: str, target: str = "", request: _Req = None):
         raise HTTPException(404, "Not found")
     ua = request.headers.get("user-agent", "") if request else ""
     body, ctype, disp = sub_mod.render_subscription(ua, target)
-    headers = {"Cache-Control": "no-store"}
+    headers = {"Cache-Control": "no-store",
+               "subscription-userinfo": sub_mod.userinfo_header()}
     if disp:
         headers["Content-Disposition"] = disp
     return PlainTextResponse(body, media_type=ctype, headers=headers)
@@ -910,6 +911,7 @@ def sub_info(request: Request, user: dict = Depends(current_user)):
         "url": f"{base}/api/sub/{tok}",
         "clash_url": f"{base}/api/sub/{tok}?target=clash",
         "nodes": n,
+        "traffic": sub_mod.get_sub_traffic(),
     }
 
 
@@ -921,6 +923,27 @@ def sub_reset(request: Request, admin: dict = Depends(require_admin)):
     base = _panel_base(request)
     db.audit(admin["sub"], "重置订阅令牌", "system", "", request.client.host)
     return {"ok": True, "token": tok, "url": f"{base}/api/sub/{tok}"}
+
+
+class SubTrafficIn(BaseModel):
+    remaining_gb: float | None = None
+    expire: str = ""
+
+
+@router.get("/apps/sub-traffic")
+def sub_traffic_get(admin: dict = Depends(require_admin)):
+    """查看订阅流量显示设置"""
+    from . import subscribe as sub_mod
+    return sub_mod.get_sub_traffic()
+
+
+@router.post("/apps/sub-traffic")
+def sub_traffic_set(body: SubTrafficIn, request: Request, admin: dict = Depends(require_admin)):
+    """流量重置：手动设定订阅显示的剩余流量（留空=9999G），可选到期日"""
+    from . import subscribe as sub_mod
+    sub_mod.set_sub_traffic(body.remaining_gb, (body.expire or "").strip())
+    db.audit(admin["sub"], "设定订阅流量显示", "system", "", request.client.host)
+    return {"ok": True, **sub_mod.get_sub_traffic()}
 
 
 # ────────────────────────── 订阅转换（外部机场导入 / Clash ↔ V2Ray 互转） ──────────────────────────
@@ -996,6 +1019,17 @@ def conv_preview(body: ConvPreviewIn, user: dict = Depends(current_user)):
     }
 
 
+@router.post("/conv/sources/{sid}/traffic")
+def conv_traffic(sid: int, body: SubTrafficIn, user: dict = Depends(current_user)):
+    """流量重置：手动设定该转换订阅显示的剩余流量（留空=9999G），可选到期日"""
+    from . import subconv as sc
+    try:
+        sc.set_traffic(sid, body.remaining_gb, (body.expire or "").strip())
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
 @router.get("/conv/{token}/clash")
 def conv_clash(token: str, request: _Req):
     """公开 Clash 订阅地址（随机 token 鉴权，无需登录）"""
@@ -1007,7 +1041,8 @@ def conv_clash(token: str, request: _Req):
     nodes = sc.node_uris(token, by_token=True)
     body = sc.build_clash_yaml(nodes, row["name"] or "NexPanel 转换")
     return PlainTextResponse(body, media_type="text/yaml; charset=utf-8",
-                             headers={"Cache-Control": "no-store"})
+                             headers={"Cache-Control": "no-store",
+                                      "subscription-userinfo": sc.row_userinfo_header(row)})
 
 
 @router.get("/conv/{token}/v2ray")
@@ -1021,7 +1056,8 @@ def conv_v2ray(token: str, request: _Req):
     nodes = sc.node_uris(token, by_token=True)
     body = sc.build_base64_uri(nodes)
     return PlainTextResponse(body, media_type="text/plain; charset=utf-8",
-                             headers={"Cache-Control": "no-store"})
+                             headers={"Cache-Control": "no-store",
+                                      "subscription-userinfo": sc.row_userinfo_header(row)})
 
 
 # ────────────────────────── 探针监控 ──────────────────────────

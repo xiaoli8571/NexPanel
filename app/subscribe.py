@@ -41,6 +41,49 @@ def reset_sub_token() -> str:
     return tok
 
 
+# ┊ 订阅流量显示（Clash subscription-userinfo） ┊
+DEFAULT_TOTAL_GB = 9999
+_GIB = 1024 ** 3
+
+
+def get_sub_traffic() -> dict:
+    """面板订阅流量显示设置 {'remaining_gb': float|None, 'expire': 'YYYY-MM-DD'|''}"""
+    rem = get_setting("sub_userinfo_remaining")
+    try:
+        rem = float(rem) if rem not in (None, "") else None
+    except (TypeError, ValueError):
+        rem = None
+    return {"remaining_gb": rem, "expire": get_setting("sub_userinfo_expire") or ""}
+
+
+def set_sub_traffic(remaining_gb, expire: str = ""):
+    """流量重置：remaining_gb=None 清除手动设置（回退默认 9999G）"""
+    set_setting("sub_userinfo_remaining",
+                "" if remaining_gb in (None, "") else str(remaining_gb))
+    set_setting("sub_userinfo_expire", (expire or "").strip())
+
+
+def userinfo_header() -> str:
+    """subscription-userinfo 头：手动剩余流量优先，否则 upload=0;download=0;total=9999G"""
+    t = get_sub_traffic()
+    exp = f"; expire={_expire_epoch(t['expire'])}" if t["expire"] else ""
+    total = DEFAULT_TOTAL_GB * _GIB
+    if t["remaining_gb"] is not None:
+        total = max(1, int(t["remaining_gb"] * _GIB))
+    return f"upload=0; download=0; total={total}{exp}"
+
+
+def _expire_epoch(expire: str) -> int:
+    """'YYYY-MM-DD'（按东八区零点）→ epoch 秒；无效返回 0"""
+    try:
+        import calendar
+        import datetime
+        d = datetime.datetime.strptime((expire or "").strip(), "%Y-%m-%d")
+        return calendar.timegm(d.timetuple()) - 8 * 3600
+    except Exception:
+        return 0
+
+
 # ┊ 收集全部已部署节点规格 ┊
 def collect_specs() -> list[dict]:
     """返回 [{...spec..., '_app': app名, '_ip': 公网IP}]，跳过没有 spec 的历史记录"""

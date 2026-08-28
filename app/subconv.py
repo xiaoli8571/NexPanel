@@ -82,13 +82,14 @@ def _y(v) -> str:
 # ────────────────────────── 拉取订阅 ──────────────────────────
 
 
-def fetch_subscription(url: str, timeout: int = 20) -> tuple[str, str]:
-    """下载订阅内容。返回 (text, note)。"""
+def fetch_subscription(url: str, timeout: int = 20) -> tuple[str, str, str]:
+    """下载订阅内容。返回 (text, note, upstream_userinfo)。"""
     req = ureq.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
     with ureq.urlopen(req, timeout=timeout) as r:
         raw = r.read()
         enc = (r.headers.get("Content-Encoding") or "").lower()
         disp = r.headers.get("Content-Disposition") or ""
+        upstream_ui = (r.headers.get("subscription-userinfo") or "").strip()
     if enc == "gzip" or raw[:2] == b"\x1f\x8b":
         import gzip
         raw = gzip.decompress(raw)
@@ -106,7 +107,7 @@ def fetch_subscription(url: str, timeout: int = 20) -> tuple[str, str]:
     if dec and b"://" in dec[:4096] and not any(l.lower().startswith(
             ("vless://", "trojan://", "ss://", "hysteria2://", "hy2://", "tuic://")) for l in lines):
         text = dec.decode("utf-8", errors="replace")
-    return text, hint or ("plain" if lines else "?")
+    return text, (hint or ("plain" if lines else "?")), upstream_ui
 
 
 # ────────────────────────── URI 解析 ──────────────────────────
@@ -433,9 +434,9 @@ def parse_subscription_text(text: str) -> list[dict]:
     return nodes
 
 
-def parse_url(url: str) -> tuple[list[dict], str]:
-    text, note = fetch_subscription(url)
-    return parse_subscription_text(text), note
+def parse_url(url: str) -> tuple[list[dict], str, str]:
+    text, note, upstream_ui = fetch_subscription(url)
+    return parse_subscription_text(text), note, upstream_ui
 
 
 # ────────────────────────── 输出：分享链接 ──────────────────────────
@@ -672,6 +673,59 @@ def ensure_table():
         created_at TEXT,
         updated_at TEXT
     )""")
+    # ┊ 流量显示（订阅userinfo）迁移：手动剩余流量 / 到期 / 上游userinfo透传 ┊
+    for col, ddl in (("userinfo_remaining", "REAL"),
+                     ("userinfo_expire", "TEXT DEFAULT ''"),
+                     ("upstream_userinfo", "TEXT DEFAULT ''")):
+        try:
+            db.ex(f"ALTER TABLE subconv ADD COLUMN {col} {ddl}")
+        except Exception:
+            pass  # 列已存在
+
+
+# ────────────────────────── 订阅 userinfo（Clash 流量显示） ──────────────────────────
+DEFAULT_TOTAL_GB = 9999
+_GIB = 1024 ** 3
+
+
+def _expire_epoch(expire: str) -> int:
+    """'YYYY-MM-DD'（按东八区零点）→ epoch 秒；无效返回 0"""
+    try:
+        import calendar
+        import datetime
+        d = datetime.datetime.strptime((expire or "").strip(), "%Y-%m-%d")
+        return calendar.timegm(d.timetuple()) - 8 * 3600
+    except Exception:
+        return 0
+
+
+def userinfo_header(remaining_gb, expire: str = "", upstream: str = "") -> str:
+    """组装 subscription-userinfo 头。
+    优先级：手动剩余流量(used=0,total=剩余) > 上游透传 > 默认 9999G(used=0)"""
+    exp = f"; expire={_expire_epoch(expire)}" if (expire or "").strip() else ""
+    try:
+        if remaining_gb is not None and str(remaining_gb).strip() != "":
+            total = max(1, int(float(remaining_gb) * _GIB))
+            return f"upload=0; download=0; total={total}{exp}"
+    except (TypeError, ValueError):
+        pass
+    upstream = (upstream or "").strip()
+    if upstream and "total=" in upstream:
+        return upstream
+    return f"upload=0; download=0; total={DEFAULT_TOTAL_GB * _GIB}{exp}"
+
+
+def row_userinfo_header(row) -> str:
+    """按 subconv 行组装 userinfo 头（row: sqlite3.Row | dict）"""
+    return userinfo_header(row["userinfo_remaining"], row["userinfo_expire"] or "",
+                           row["upstream_userinfo"] or "")
+
+
+def set_traffic(sid: int, remaining_gb, expire: str = ""):
+    """流量重置：手动设定剩余流量（None=清除，回退上游/9999G）与可选到期日"""
+    ensure_table()
+    db.ex("UPDATE subconv SET userinfo_remaining=?, userinfo_expire=?, updated_at=? WHERE id=?",
+          (remaining_gb, (expire or "").strip(), _now(), sid))
 
 
 def _now() -> str:
@@ -711,9 +765,10 @@ def add_source(name: str, url: str = "", content: str = "") -> dict:
     err = ""
     nodes: list[dict] = []
     note = ""
+    upstream_ui = ""
     try:
         if url:
-            nodes, note = parse_url(url)
+            nodes, note, upstream_ui = parse_url(url)
         elif content:
             nodes = parse_subscription_text(content)
             note = "content"
@@ -723,9 +778,9 @@ def add_source(name: str, url: str = "", content: str = "") -> dict:
         err = f"拉取/解析失败: {e}"
     nodes_json = json.dumps(nodes, ensure_ascii=False)
     now = _now()
-    db.ex("""INSERT INTO subconv(name,token,url,content,nodes,note,created_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?)""",
-          (name, token, url, content, nodes_json, note, now, now))
+    db.ex("""INSERT INTO subconv(name,token,url,content,nodes,note,created_at,updated_at,upstream_userinfo)
+             VALUES(?,?,?,?,?,?,?,?,?)""",
+          (name, token, url, content, nodes_json, note, now, now, upstream_ui))
     row = db.one("SELECT * FROM subconv WHERE token=?", (token,))
     d = dict(row)
     d["nodes"] = nodes
@@ -741,9 +796,10 @@ def refresh_source(sid: int) -> dict:
         raise KeyError("订阅不存在")
     nodes: list[dict] = []
     note, err = "", ""
+    upstream_ui = ""
     try:
         if row["url"]:
-            nodes, note = parse_url(row["url"])
+            nodes, note, upstream_ui = parse_url(row["url"])
         elif row["content"]:
             nodes = parse_subscription_text(row["content"])
             note = "content"
@@ -751,8 +807,8 @@ def refresh_source(sid: int) -> dict:
             err = "未解析到任何节点"
     except Exception as e:
         err = f"拉取/解析失败: {e}"
-    db.ex("UPDATE subconv SET nodes=?, note=?, updated_at=? WHERE id=?",
-          (json.dumps(nodes, ensure_ascii=False), note, _now(), sid))
+    db.ex("UPDATE subconv SET nodes=?, note=?, updated_at=?, upstream_userinfo=? WHERE id=?",
+          (json.dumps(nodes, ensure_ascii=False), note, _now(), upstream_ui, sid))
     out = dict(db.one("SELECT * FROM subconv WHERE id=?", (sid,)))
     out["nodes"] = nodes
     out["node_count"] = len(nodes)
