@@ -1650,9 +1650,9 @@ async function viewSettings(){
     <div class="card"><h4><span class="dot" style="background:#38bdf8"></span>🔁 订阅转换</h4>
       <p style="color:var(--muted);font-size:12.5px;margin-bottom:10px">导入其他机场/面板的订阅，自动转成 Clash / V2Ray 订阅地址，直接填进客户端即可。</p>
       <div id="subconv-list" style="display:flex;flex-direction:column;gap:10px"></div>
-      <div class="form-grid" style="grid-template-columns:1fr 2fr;margin-top:12px">
-        <input class="input" id="subconv-name" placeholder="名称（如 机场A）">
-        <input class="input" id="subconv-url" placeholder="https://机场订阅链接（粘贴多行节点内容也行）">
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+        <input class="input" id="subconv-name" placeholder="名称（如 机场A）" style="width:100%;min-width:0">
+        <input class="input" id="subconv-url" placeholder="https://机场订阅链接（粘贴多行节点内容也行）" style="width:100%;min-width:0">
       </div>
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
         <button class="btn primary" id="btn-subconv-add">＋ 导入</button>

@@ -2,7 +2,7 @@
 
 * 8合1 全家桶: XTLS-Reality / Hysteria2 / TUIC / Trojan / H2-Reality /
                gRPC-Reality / AnyTLS / Naive （起始端口连续 8 个, 共用 UUID）
-* 单节点:     上述任一 + VLESS-WS / VMess-WS / SS-2022
+* 单节点:     上述任一 + VLESS-WS / SS-2022 （VMess 已移除，不再支持）
 * 落地形态:   sing-box 跑在指定 LXC 容器内; 面板自动在宿主节点加 DNAT 端口映射
 """
 import base64
@@ -41,7 +41,7 @@ CATALOG = {
     "anytls":       {"label": "AnyTLS", "single": PROTOCOL_SEQ[6]},
     "naive":        {"label": "Naive", "single": PROTOCOL_SEQ[7]},
     "vless-ws":     {"label": "VLESS + WS", "single": {"protocol": "VLESS-WS"}},
-    "vmess-ws":     {"label": "VMess + WS", "single": {"protocol": "VMESS-WS"}},
+    # VMess 已整体移除（Clash 订阅缺 cipher 字段导致导入报错，弃用）
     "ss-2022":      {"label": "Shadowsocks 2022", "single": {"protocol": "SS-2022"}},
 }
 
@@ -111,10 +111,6 @@ def build_singbox_config(nodes_spec: list[dict], cert_path="/etc/sing-box/cert.p
         if proto == "VLESS-WS":
             conf["inbounds"].append({**base, "type": "vless",
                 "users": [{"uuid": uuid_}],
-                "transport": {"type": "ws", "path": "/"}})
-        elif proto == "VMESS-WS":
-            conf["inbounds"].append({**base, "type": "vmess",
-                "users": [{"uuid": uuid_, "alterId": 0}],
                 "transport": {"type": "ws", "path": "/"}})
         elif proto == "SS-2022":
             conf["inbounds"].append({**base, "type": "shadowsocks",
@@ -212,12 +208,6 @@ def build_links(nodes_spec, ip: str, name_prefix: str) -> list[str]:
         elif proto == "VLESS-WS":
             links.append(f"vless://{n['uuid']}@{ip}:{port}?type=ws&path=%2F"
                          f"&host={quote(ip)}#{remark}")
-        elif proto == "VMESS-WS":
-            vm = {"v": "2", "ps": remark, "add": ip, "port": str(port),
-                  "id": n["uuid"], "aid": "0", "net": "ws", "path": "/",
-                  "host": ip, "tls": ""}
-            links.append("vmess://" + base64.b64encode(
-                json.dumps(vm).encode()).decode())
         elif proto == "SS-2022":
             userinfo = base64.b64encode(
                 f"2022-blake3-aes-128-gcm:{n['password']}".encode()).decode()

@@ -69,7 +69,8 @@ def collect_links() -> list[str]:
             out.extend(json.loads(r["links"] or "[]"))
         except Exception:
             continue
-    return out
+    # VMess 已弃用：历史存量 vmess:// 链接一律不再下发
+    return [l for l in out if not str(l).startswith("vmess://")]
 
 
 # ┊ Clash YAML 构建（mihomo / Clash.Meta 全协议） ┊
@@ -82,6 +83,8 @@ def _y(v) -> str:
 def _clash_proxy(n: dict, name: str, ip: str) -> str | None:
     """把单个节点 spec 转成 Clash(mihomo) proxy 字典 YAML 片段"""
     proto, port, sni = n["protocol"], int(n["port"]), n.get("sni") or ""
+    if proto == "VMESS-WS":
+        return None  # VMess 已弃用：不输出到订阅（存量节点自动过滤）
     uuid_, pwd = n.get("uuid", ""), n.get("password", "")
     L = []
 
@@ -125,12 +128,9 @@ def _clash_proxy(n: dict, name: str, ip: str) -> str | None:
         L.append(f"  - name: {_y(name)}"); w("type", "anytls"); w("server", ip); L.append(f"    port: {port}")
         w("password", pwd); w("client-fingerprint", "chrome"); L.append("    udp: true")
         w("sni", sni); L.append("    skip-cert-verify: true")
-    elif proto in ("VLESS-WS", "VMESS-WS"):
-        t = "vless" if proto == "VLESS-WS" else "vmess"
-        L.append(f"  - name: {_y(name)}"); w("type", t); w("server", ip); L.append(f"    port: {port}")
+    elif proto == "VLESS-WS":
+        L.append(f"  - name: {_y(name)}"); w("type", "vless"); w("server", ip); L.append(f"    port: {port}")
         w("uuid", uuid_)
-        if t == "vmess":
-            w("alterId", "0")
         L.append("    udp: true"); w("network", "ws")
         L.append("    ws-opts:"); w("path", "/", 6)
     elif proto == "SS-2022":

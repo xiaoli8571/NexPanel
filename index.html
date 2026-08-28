@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>我的博客</title>
+  <style>
+    /* ========== 基础样式 ========== */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      background: #f5f5f5;
+      color: #333;
+      line-height: 1.7;
+    }
+
+    a {
+      color: #0077cc;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    /* ========== 顶部导航 ========== */
+    header {
+      background: #fff;
+      border-bottom: 1px solid #e8e8e8;
+      padding: 16px 0;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+
+    .header-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .logo {
+      font-size: 24px;
+      font-weight: bold;
+      color: #333;
+    }
+
+    nav a {
+      margin-left: 20px;
+    }
+
+    /* ========== 主区域 ========== */
+    main {
+      padding: 30px 0;
+    }
+
+    .post {
+      background: #fff;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+    }
+
+    .post-title {
+      font-size: 22px;
+      margin-bottom: 8px;
+    }
+
+    .post-meta {
+      color: #999;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+
+    .post-excerpt {
+      color: #555;
+    }
+
+    .read-more {
+      display: inline-block;
+      margin-top: 12px;
+      font-size: 14px;
+    }
+
+    /* ========== 页脚 ========== */
+    footer {
+      text-align: center;
+      padding: 20px 0;
+      color: #999;
+      font-size: 14px;
+      border-top: 1px solid #e8e8e8;
+      background: #fff;
+    }
+
+    /* ========== 响应式 ========== */
+    @media (max-width: 600px) {
+      .header-inner {
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      nav a {
+        margin: 0 10px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 顶部导航 -->
+  <header>
+    <div class="container header-inner">
+      <a class="logo" href="#">我的博客</a>
+      <nav>
+        <a href="#">首页</a>
+        <a href="#">文章</a>
+        <a href="#">关于</a>
+        <a href="#">联系</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- 博客文章列表 -->
+  <main class="container">
+    <article class="post">
+      <h2 class="post-title">
+        <a href="#">我的第一篇博客文章</a>
+      </h2>
+      <div class="post-meta">2024-01-15 · 编程</div>
+      <p class="post-excerpt">
+        这是文章摘要，可以用来简单描述文章内容。读者可以通过摘要快速了解这篇文章讲的是什么。
+      </p>
+      <a class="read-more" href="#">阅读全文 →</a>
+    </article>
+
+    <article class="post">
+      <h2 class="post-title">
+        <a href="#">如何开始学习 Web 开发</a>
+      </h2>
+      <div class="post-meta">2024-01-10 · 前端</div>
+      <p class="post-excerpt">
+        从 HTML、CSS 到 JavaScript，Web 开发其实没有想象中那么难。本文分享一些适合新手的学习路径。
+      </p>
+      <a class="read-more" href="#">阅读全文 →</a>
+    </article>
+
+    <article class="post">
+      <h2 class="post-title">
+        <a href="#">我的开发工具推荐</a>
+      </h2>
+      <div class="post-meta">2024-01-05 · 工具</div>
+      <p class="post-excerpt">
+        好的工具能大幅提升开发效率。这篇文章整理了我日常开发中经常使用的一些工具和插件。
+      </p>
+      <a class="read-more" href="#">阅读全文 →</a>
+    </article>
+  </main>
+
+  <!-- 页脚 -->
+  <footer>
+    <div class="container">
+      © 2024 我的博客 · 使用 HTML 和 CSS 制作
+    </div>
+  </footer>
+
+</body>
+</html>

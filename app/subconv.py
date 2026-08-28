@@ -5,7 +5,7 @@
   * Base64 URI 订阅（v2rayNG / Shadowrocket / NekoBox 等）
 
 输入识别：
-  * 明文分享链接（多行 vless:// vmess:// trojan:// ss:// hysteria2:// tuic://...）
+  * 明文分享链接（多行 vless:// trojan:// ss:// hysteria2:// tuic://...；vmess:// 已弃用，自动跳过）
   * Base64 包装的分享链接列表（机场常见）
   * Clash YAML（含 proxies 列表，支持 ws/grpc/h2/reality 等传输层）
 
@@ -104,7 +104,7 @@ def fetch_subscription(url: str, timeout: int = 20) -> tuple[str, str]:
     joined = "".join(lines)
     dec = _b64d(joined)
     if dec and b"://" in dec[:4096] and not any(l.lower().startswith(
-            ("vless://", "vmess://", "trojan://", "ss://", "hysteria2://", "hy2://", "tuic://")) for l in lines):
+            ("vless://", "trojan://", "ss://", "hysteria2://", "hy2://", "tuic://")) for l in lines):
         text = dec.decode("utf-8", errors="replace")
     return text, hint or ("plain" if lines else "?")
 
@@ -120,28 +120,6 @@ def _host_port(hostport: str) -> tuple[str, int] | None:
     if not server or not port_s:
         return None
     return server, _port(port_s)
-
-
-def parse_vmess(uri: str) -> dict | None:
-    raw = uri.split("://", 1)[1].rsplit("#", 1)
-    name = _unq(raw[1]) if len(raw) > 1 else ""
-    try:
-        data = json.loads(_b64d(raw[0]) or b"{}")
-    except Exception:
-        return None
-    if not data.get("add") or not data.get("port"):
-        return None
-    n = {
-        "name": _clip(data.get("ps") or name or data["add"] + ":" + str(data["port"])),
-        "type": "vmess", "server": data["add"], "port": _port(data.get("port")),
-        "uuid": data.get("id") or "", "alterId": int(data.get("aid") or 0),
-        "network": data.get("net") or "tcp",
-        "tls": str(data.get("tls", "")).lower() == "tls" or str(data.get("scy", "")).lower() == "auto",
-        "sni": data.get("sni") or data.get("host") or "", "host": data.get("host") or "",
-        "path": data.get("path") or "", "alpn": data.get("alpn") or "",
-        "_src": "uri",
-    }
-    return n
 
 
 def parse_ss(uri: str) -> dict | None:
@@ -237,7 +215,7 @@ def parse_uri(uri: str) -> dict | None:
     scheme = uri.split("://", 1)[0].lower()
     try:
         if scheme == "vmess":
-            return parse_vmess(uri)
+            return None  # VMess 已弃用：外部订阅中的 vmess 节点直接跳过
         if scheme == "ss":
             return parse_ss(uri)
         if scheme in ("vless", "trojan", "hysteria2", "hy2", "tuic"):
@@ -359,6 +337,8 @@ def _clash_proxy_to_node(p: dict, src: str = "clash") -> dict | None:
         port = _port(p.get("port"))
         if not typ or not server:
             return None
+        if typ == "vmess":
+            return None  # VMess 已弃用：Clash YAML 导入时直接跳过
         n = {"name": _clip(p.get("name") or f"{server}:{port}"), "type": typ,
              "server": server, "port": port, "_src": src}
         ws = p.get("ws-opts") or {}
@@ -382,9 +362,6 @@ def _clash_proxy_to_node(p: dict, src: str = "clash") -> dict | None:
         n["sid"] = ro.get("short-id") or p.get("sid") or ""
         if typ == "vless":
             n["uuid"] = p.get("uuid") or ""
-        elif typ == "vmess":
-            n["uuid"] = p.get("uuid") or ""
-            n["alterId"] = int(p.get("alterId") or 0)
         elif typ == "trojan":
             n["password"] = p.get("password") or ""
         elif typ == "ss":
@@ -493,15 +470,6 @@ def to_uri(n: dict) -> str | None:
                 if n.get("host"):
                     q["host"] = n["host"]
             return f"vless://{n.get('uuid')}@{server}:{port}?" + up.urlencode(q) + "#" + name
-        if typ == "vmess":
-            data = {
-                "v": "2", "ps": n.get("name") or "", "add": server, "port": str(port),
-                "id": n.get("uuid") or "", "aid": str(n.get("alterId") or 0),
-                "net": n.get("network") or "tcp", "type": "none",
-                "host": n.get("host") or "", "path": n.get("path") or "",
-                "tls": "tls" if n.get("tls") else "", "sni": n.get("sni") or "",
-            }
-            return "vmess://" + _b64e(json.dumps(data, separators=(",", ":")))
         if typ == "trojan":
             q = {}
             if n.get("sni"):
