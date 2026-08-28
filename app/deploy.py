@@ -285,7 +285,9 @@ if [ ! -f /etc/sing-box/cert.pem ] && command -v openssl >/dev/null 2>&1; then
     -out /etc/sing-box/cert.pem -days 3650 -nodes -subj "/CN=bing.com" >/dev/null 2>&1
 fi
 ''' + f'echo {cfg_b64!r} | base64 -d > /etc/sing-box/config.json\n' + r'''
-if command -v systemctl >/dev/null 2>&1; then
+SVC_MODE=""
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  # systemd 运行时探测（PID1 为 systemd）；仅凭 systemctl 命令存在会误判无 init 容器
   cat > /etc/systemd/system/sing-box.service <<UNIT
 [Unit]
 Description=sing-box (NexPanel)
@@ -297,10 +299,13 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl daemon-reload
-  systemctl enable sing-box >/dev/null 2>&1 || true
-  systemctl restart sing-box
-elif command -v rc-service >/dev/null 2>&1; then
+  if systemctl daemon-reload >/dev/null 2>&1 && systemctl enable sing-box >/dev/null 2>&1; then
+    systemctl restart sing-box 2>/dev/null || systemctl start sing-box 2>/dev/null || true
+    SVC_MODE=systemd
+  else
+    echo "[WARN] systemd 服务注册失败，回退为托管后台进程"
+  fi
+elif command -v rc-service >/dev/null 2>&1 && command -v openrc-run >/dev/null 2>&1; then
   cat > /etc/init.d/sing-box <<'RC'
 #!/sbin/openrc-run
 command="/usr/local/bin/sing-box"
@@ -310,16 +315,40 @@ command_background="yes"
 RC
   chmod +x /etc/init.d/sing-box
   rc-update add sing-box default >/dev/null 2>&1 || true
-  rc-service sing-box restart || rc-service sing-box start
-else
-  pkill -f "sing-box run" 2>/dev/null || true
-  nohup /usr/local/bin/sing-box run -c /etc/sing-box/config.json >/var/log/singbox.log 2>&1 &
+  if rc-service sing-box restart >/dev/null 2>&1 || rc-service sing-box start >/dev/null 2>&1; then
+    SVC_MODE=openrc
+  else
+    echo "[WARN] OpenRC 启动失败，回退为托管后台进程"
+  fi
 fi
-sleep 1.5
-if pidof sing-box >/dev/null 2>&1 || (command -v systemctl >/dev/null && systemctl is-active sing-box >/dev/null); then
-  echo "[OK] sing-box running"
+if [ -z "$SVC_MODE" ]; then
+  # 无 init 系统（纯容器 / K8s Pod）：托管式后台拉起 + 日志/pid + cron @reboot 兜底
+  mkdir -p /etc/sing-box /var/log
+  cat > /etc/sing-box/run-bg.sh <<'BG'
+#!/bin/sh
+pkill -f "sing-box run" 2>/dev/null || true
+sleep 1
+if command -v setsid >/dev/null 2>&1; then
+  setsid /usr/local/bin/sing-box run -c /etc/sing-box/config.json >>/var/log/singbox.log 2>&1 &
 else
-  echo "[FAIL] sing-box not running"; exit 1
+  nohup /usr/local/bin/sing-box run -c /etc/sing-box/config.json >>/var/log/singbox.log 2>&1 &
+fi
+echo $! > /run/singbox.pid
+BG
+  chmod +x /etc/sing-box/run-bg.sh
+  /etc/sing-box/run-bg.sh || true
+  if command -v crontab >/dev/null 2>&1; then
+    (crontab -l 2>/dev/null | grep -v "sing-box/run-bg.sh"; \
+     echo "@reboot /etc/sing-box/run-bg.sh >/dev/null 2>&1") | crontab - >/dev/null 2>&1 || true
+  fi
+  SVC_MODE=background
+fi
+sleep 2
+if pidof sing-box >/dev/null 2>&1 || pgrep -f "sing-box run" >/dev/null 2>&1 \
+   || { [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && systemctl is-active sing-box >/dev/null 2>&1; }; then
+  echo "[OK] sing-box running (mode=$SVC_MODE)"
+else
+  echo "[FAIL] sing-box not running（查看 /var/log/singbox.log）"; exit 1
 fi
 '''
 

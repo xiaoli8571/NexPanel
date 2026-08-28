@@ -449,15 +449,28 @@ def main():
     for i, a in enumerate(sys.argv):
         if a == "--api" and i+1 < len(sys.argv): API = sys.argv[i+1]
         if a == "--token" and i+1 < len(sys.argv): TOKEN = sys.argv[i+1]
+    # conf 与脚本同目录优先（支持非 root / 只读 /opt 的容器环境），旧路径兜底
+    _here = os.path.dirname(os.path.abspath(__file__))
+    conf_paths = [os.path.join(_here, "agent.conf"), CONF]
     if not API or not TOKEN:
+        for _cp in conf_paths:
+            try:
+                conf = json.load(open(_cp)); API = conf["api"]; TOKEN = conf["token"]; break
+            except Exception:
+                continue
+    if not API or not TOKEN:
+        print("usage: agent.py --api https://panel --token TOKEN"); sys.exit(1)
+    saved = "memory-only"
+    for _cp in conf_paths:
         try:
-            conf = json.load(open(CONF)); API = conf["api"]; TOKEN = conf["token"]
+            os.makedirs(os.path.dirname(_cp), exist_ok=True)
+            json.dump({"api":API,"token":TOKEN}, open(_cp,"w"))
+            os.chmod(_cp, 0o600)
+            saved = _cp
+            break
         except Exception:
-            print("usage: agent.py --api https://panel --token TOKEN"); sys.exit(1)
-    os.makedirs(os.path.dirname(CONF), exist_ok=True)
-    json.dump({"api":API,"token":TOKEN}, open(CONF,"w"))
-    os.chmod(CONF, 0o600)
-    log(f"started v20260827 (poll=0.18s when pty), panel={API}")
+            continue
+    log(f"started v20260828 (conf={saved}), panel={API}")
     fail = 0
     _last_rep: dict = {}
     while True:
