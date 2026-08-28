@@ -468,7 +468,8 @@ async function viewNodes(){
             ${!isProbe?`<span class="tag">${n.counts.total} 台实例</span>
             <span class="tag" style="color:${n.counts.running?'var(--ok-strong)':'inherit'}">${n.counts.running} 运行</span>
             ${n.install_lxc||n.lxc_ok?`<span class="tag" style="color:var(--accent-2)">🖥 母机</span>`:""}
-            ${n.kind==="agent"&&!n.lxc_ok&&n.status==="online"?`<button class="btn sm primary" data-install="${n.id}">⚡ 安装 LXC</button>`:""}`:""}
+            ${n.kind==="agent"&&!n.lxc_ok&&n.status==="online"?`<button class="btn sm primary" data-install="${n.id}">⚡ 安装 LXC</button>`:""}
+            ${(n.kind==="agent"||n.kind==="ssh")&&n.lxc_ok&&n.status==="online"?`<button class="btn sm" data-uninst-lxc="${n.id}" title="只卸载 LXC 组件，不影响面板 Agent；容器数据保留">🧹 卸载 LXC</button>`:""}`:""}
           </div>
           <div class="actions-cell" style="margin-top:12px">
             <button class="btn sm" data-move="${i}" data-dir="-1" title="上移">↑</button>
@@ -536,6 +537,16 @@ async function viewNodes(){
         toast("正在通过 SSH 安装 LXC，可能需要几分钟…","info",6000);
         try{ const r=await api(`/nodes/${b.dataset.install}/install`,{method:"POST"});
           toast(r.output.split("\n")[0],"ok",5000); }catch(e){ toast(String(e.message).slice(0,120),"err",5000); }
+        render();
+      });
+      $$("#node-grid [data-uninst-lxc]").forEach(b=>b.onclick=async()=>{
+        const yes = await confirmModal(
+          `确认卸载该节点的 <b>LXC</b>？<br>只移除 LXC 组件与 lxcbr0 网桥，<b>不影响面板 Agent</b>；容器数据 /var/lib/lxc 保留（重装 LXC 后仍可用）。<br>卸载前请确保该节点没有运行中的容器。`, true);
+        if(!yes) return;
+        b.disabled=true; b.textContent="卸载中…";
+        toast("正在卸载 LXC（保留 Agent），可能需要一两分钟…","info",6000);
+        try{ await api(`/nodes/${b.dataset.uninstLxc}/uninstall-lxc`,{method:"POST"});
+          toast("✓ LXC 已卸载，Agent 不受影响","ok",5000); }catch(e){ toast(String(e.message).slice(0,160),"err",5000); }
         render();
       });
       $$("#node-grid [data-swap]").forEach(b=>b.onclick=()=>openSwapModal(+b.dataset.swap));

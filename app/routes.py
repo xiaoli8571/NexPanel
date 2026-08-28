@@ -376,6 +376,65 @@ async def install_node_lxc(nid: int, request: Request, admin: dict = Depends(req
         raise HTTPException(500, f"安装失败:\n{tail[-400:]}")
     return {"ok": True, "output": tail[-800:]}
 
+# ┊ LXC 卸载脚本：只卸 LXC 相关包，绝不动 /opt/lxcdeck-agent 与 lxcdeck-agent 服务 ┊
+# 按「先列出实际已装的相关包再卸载」的顺序，避免包名不存在导致失败；容器数据 /var/lib/lxc 保留
+UNINSTALL_LXC = (
+    "export DEBIAN_FRONTEND=noninteractive\n"
+    "PKGS=''\n"
+    "if command -v dpkg >/dev/null 2>&1; then\n"
+    "  PKGS=$(dpkg -l 2>/dev/null | awk '/^ii/ && $2 ~ /^(lxc|liblxc|lxcfs|lug-firmlxc)/ {print $2}')\n"
+    "  [ -n \"$PKGS\" ] && apt-get purge -y -qq $PKGS >/dev/null 2>&1; apt-get autoremove -y -qq >/dev/null 2>&1\n"
+    "elif command -v rpm >/dev/null 2>&1; then\n"
+    "  PKGS=$(rpm -qa 2>/dev/null | grep -E '^(lxc|liblxc|lxcfs)')\n"
+    "  [ -n \"$PKGS\" ] && { if command -v dnf >/dev/null 2>&1; then dnf remove -y -q $PKGS; else yum remove -y -q $PKGS; fi; }\n"
+    "elif command -v apk >/dev/null 2>&1; then\n"
+    "  PKGS=$(apk info 2>/dev/null | grep -E '^(lxc|lxc-|lxcfs)')\n"
+    "  [ -n \"$PKGS\" ] && apk del $PKGS >/dev/null 2>&1\n"
+    "fi\n"
+    "ip link show lxcbr0 >/dev/null 2>&1 && ip link del lxcbr0 2>/dev/null\n"
+    "if command -v lxc-start >/dev/null 2>&1; then echo LXC_STILL_PRESENT; else echo LXC_REMOVED; fi"
+)
+
+
+@router.post("/nodes/{nid}/uninstall-lxc")
+async def uninstall_node_lxc(nid: int, request: Request, admin: dict = Depends(require_admin)):
+    """只卸载 LXC 相关组件（包 + lxcbr0 网桥），不影响面板 Agent；
+    容器数据 /var/lib/lxc 保留（重装 LXC 后仍可用），卸载前须无运行中容器"""
+    import asyncio as _aio
+    node = _get_node(nid)
+    if node["kind"] == "demo":
+        raise HTTPException(400, "演示节点无需操作")
+    if node["kind"] == "agent" and not agent_mod.is_online(nid):
+        raise HTTPException(400, "Agent 离线，无法下发卸载指令")
+    running = db.one("SELECT COUNT(*) n FROM containers WHERE node_id=? AND status='running'",
+                     (nid,))["n"]
+    if running:
+        raise HTTPException(400, f"该节点还有 {running} 台运行中的容器，请先停止/删除再卸载 LXC")
+
+    try:
+        if node["kind"] == "agent":
+            cid = agent_mod.queue_exec(nid, UNINSTALL_LXC, timeout=300)
+            res = await _aio.to_thread(agent_mod.wait_result, cid, 330)
+            if res is None:
+                raise RuntimeError("卸载超时（apt 可能在后台进行，可稍后重试）")
+            rc, out = res["rc"], res["out"]
+        else:
+            rc, out = await _aio.to_thread(nodes_mod.run_cmd, node, UNINSTALL_LXC, 300, True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e)[-500:])
+
+    tail = "\n".join(out.splitlines()[-20:])
+    ok = rc == 0 and "LXC_REMOVED" in out
+    if ok:
+        db.ex("UPDATE nodes SET lxc_ok=? WHERE id=?", (0, nid))
+    db.audit(admin["sub"], "卸载LXC", node["name"],
+             "成功" if ok else tail[-120:], request.client.host)
+    if not ok:
+        raise HTTPException(500, f"卸载未完成（LXC 仍有残留）:\n{tail[-400:]}")
+    return {"ok": True, "output": tail[-800:]}
+
 
 @router.delete("/nodes/{nid}")
 def delete_node(nid: int, request: Request, force: int = 0,
