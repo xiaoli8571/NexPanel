@@ -509,6 +509,7 @@ elif command -v rc-service >/dev/null 2>&1; then
   rm -f /etc/init.d/lxcdeck-agent
 fi
 rm -rf /opt/lxcdeck-agent
+command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | grep -v "lxcdeck-agent/run-bg.sh" | crontab - >/dev/null 2>&1 || true)
 if pgrep -f "/opt/lxcdeck-agent/agent.py" >/dev/null 2>&1; then
   echo "[WARN] 仍有残留进程，请手动执行: pkill -9 -f lxcdeck"
 else
@@ -555,8 +556,10 @@ cat > /opt/lxcdeck-agent/agent.conf <<EOF2
 EOF2
 chmod 600 /opt/lxcdeck-agent/agent.conf
 
-if command -v systemctl >/dev/null 2>&1; then
-  # systemd 发行版（Debian/Ubuntu/CentOS/Rocky 等）
+SVC_MODE=""
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  # systemd 正在运行（判断依据：PID1 为 systemd，/run/systemd/system 存在；
+  # 仅凭 systemctl 命令存在会误判无 init 的容器环境）
   cat > /etc/systemd/system/lxcdeck-agent.service <<EOF2
 [Unit]
 Description=NexPanel Agent
@@ -568,11 +571,13 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF2
-  systemctl daemon-reload
-  systemctl enable --now lxcdeck-agent
-  sleep 2
-  systemctl is-active lxcdeck-agent && echo "[OK] NexPanel Agent 已上线"
-elif command -v rc-service >/dev/null 2>&1; then
+  if systemctl daemon-reload >/dev/null 2>&1 \
+     && systemctl enable --now lxcdeck-agent >/dev/null 2>&1; then
+    SVC_MODE="systemd"
+  else
+    echo "[WARN] systemd 服务注册失败，回退为托管后台进程"
+  fi
+elif command -v rc-service >/dev/null 2>&1 && command -v openrc-run >/dev/null 2>&1; then
   # Alpine / OpenRC
   cat > /opt/lxcdeck-agent/run.sh <<EOF2
 #!/bin/sh
@@ -592,11 +597,46 @@ depend() {
 EOF2
   chmod +x /etc/init.d/lxcdeck-agent
   rc-update add lxcdeck-agent default >/dev/null 2>&1 || true
-  rc-service lxcdeck-agent start
-  sleep 2
-  rc-service lxcdeck-agent status >/dev/null 2>&1 && echo "[OK] NexPanel Agent 已上线"
+  if rc-service lxcdeck-agent start >/dev/null 2>&1 \
+     && rc-service lxcdeck-agent status >/dev/null 2>&1; then
+    SVC_MODE="openrc"
+  else
+    echo "[WARN] OpenRC 服务启动失败，回退为托管后台进程"
+  fi
+fi
+if [ -z "$SVC_MODE" ]; then
+  # 无 init 系统（纯容器 / K8s Pod）：托管式后台拉起，日志与 pid 落盘，有 cron 则加 @reboot 自启
+  cat > /opt/lxcdeck-agent/run-bg.sh <<EOF2
+#!/bin/sh
+pkill -f "/opt/lxcdeck-agent/agent.py" 2>/dev/null || true
+sleep 1
+if command -v setsid >/dev/null 2>&1; then
+  setsid /usr/bin/python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN >>/opt/lxcdeck-agent/agent.log 2>&1 &
 else
-  echo "[WARN] 未检测到 systemd/OpenRC，请手动执行: nohup python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN &"
+  nohup /usr/bin/python3 /opt/lxcdeck-agent/agent.py --api $API --token $TOKEN >>/opt/lxcdeck-agent/agent.log 2>&1 &
+fi
+echo \$! > /opt/lxcdeck-agent/agent.pid
+EOF2
+  chmod +x /opt/lxcdeck-agent/run-bg.sh
+  /opt/lxcdeck-agent/run-bg.sh || true
+  if command -v crontab >/dev/null 2>&1; then
+    (crontab -l 2>/dev/null | grep -v "lxcdeck-agent/run-bg.sh"; \
+     echo "@reboot /opt/lxcdeck-agent/run-bg.sh >/dev/null 2>&1") | crontab - >/dev/null 2>&1 || true
+  fi
+  SVC_MODE="background"
+fi
+sleep 2
+ALIVE=0
+if command -v pgrep >/dev/null 2>&1; then
+  pgrep -f "/opt/lxcdeck-agent/agent.py" >/dev/null 2>&1 && ALIVE=1
+elif [ -f /opt/lxcdeck-agent/agent.pid ]; then
+  kill -0 "$(cat /opt/lxcdeck-agent/agent.pid)" 2>/dev/null && ALIVE=1
+fi
+if [ "$ALIVE" = "1" ]; then
+  echo "[OK] NexPanel Agent 已上线 (mode=$SVC_MODE)"
+else
+  echo "[ERR] Agent 启动失败，请查看 /opt/lxcdeck-agent/agent.log"
+  exit 1
 fi
 '''
 

@@ -1007,7 +1007,6 @@ async function viewApps(){
               <option value="anytls">AnyTLS</option>
               <option value="naive">Naive</option>
               <option value="vless-ws">VLESS + WS</option>
-              <option value="vmess-ws">VMess + WS</option>
               <option value="ss-2022">Shadowsocks 2022</option>
             </select></label>
           <label>起始端口 *<input id="d-port" type="number" value="8881" min="1024" max="65528"></label>

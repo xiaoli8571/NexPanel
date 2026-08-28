@@ -540,9 +540,6 @@ def _clash_proxy_block(n: dict) -> str | None:
         w("uuid", n.get("uuid") or "")
         if n.get("flow"):
             w("flow", n["flow"])
-    elif typ == "vmess":
-        w("uuid", n.get("uuid") or "")
-        w("alterId", str(n.get("alterId") or 0))
     elif typ == "trojan":
         w("password", n.get("password") or "")
     elif typ == "ss":
@@ -563,7 +560,7 @@ def _clash_proxy_block(n: dict) -> str | None:
     else:
         return None
     if n.get("tls") or typ == "vless":
-        if typ in ("vless", "vmess"):
+        if typ == "vless":
             wraw("tls", "true")
             if n.get("sni"):
                 w("servername", n["sni"])
@@ -573,7 +570,7 @@ def _clash_proxy_block(n: dict) -> str | None:
                 w("alpn", n["alpn"])
     if n.get("skip_cert_verify"):
         wraw("skip-cert-verify", "true")
-    if typ in ("vless", "vmess", "trojan"):
+    if typ in ("vless", "trojan"):
         if net == "ws":
             w("network", "ws")
             L.append("    ws-opts:")
