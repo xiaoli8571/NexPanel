@@ -61,6 +61,19 @@ const state = {
 };
 let tickHandle = null, wsRef = null;
 
+// 后端错误文本统一解包：detail 可能是字符串/对象/数组（FastAPI 校验错误），避免 [object Object]
+function errMsg(d){
+  if(d == null) return "";
+  if(typeof d === "string") return d;
+  if(typeof d === "object"){
+    if(typeof d.detail === "string") return d.detail;
+    if(Array.isArray(d.detail)) return d.detail.map(x => x?.msg || JSON.stringify(x)).join("; ");
+    if(typeof d.message === "string") return d.message;
+    try{ return JSON.stringify(d); }catch(_){ return String(d); }
+  }
+  return String(d);
+}
+
 async function api(path, { method="GET", body }={}){
   const headers = {};
   if(state.token) headers.Authorization = "Bearer "+state.token;
@@ -68,7 +81,7 @@ async function api(path, { method="GET", body }={}){
   const r = await fetch("/api"+path, { method, headers, body: body!==undefined?JSON.stringify(body):undefined });
   if(r.status === 401){ doLogout(); throw new Error("登录已过期"); }
   const data = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data.detail || `请求失败(${r.status})`);
+  if(!r.ok) throw new Error(errMsg(data) || `请求失败(${r.status})`);
   return data;
 }
 
