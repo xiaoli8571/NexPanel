@@ -207,6 +207,9 @@ def serve_socks():
 def main():
     signal.signal(signal.SIGTERM, lambda *_: (kill_cur(), sys.exit(0)))
     os.makedirs(BASE, exist_ok=True)
+    if os.path.exists(BASE + "/redial"):   # 清理上次会话残留的换 IP 信号
+        try: os.remove(BASE + "/redial")
+        except Exception: pass
     threading.Thread(target=serve_socks, daemon=True).start()
     dead = set()
     while True:
@@ -224,8 +227,10 @@ def main():
         if not nodes:
             _state.update(msg="no node for %s" % country); write_status(country)
             time.sleep(60); continue
+        tried = False
         for r in nodes:
             if r.get("IP") in dead: continue
+            tried = True
             _state.update(state="pending", msg="connect " + r.get("HostName", "?"), node=r.get("HostName", ""))
             write_status(country)
             proc, lf = connect_once(r); _cur_proc["p"] = proc
@@ -253,6 +258,10 @@ def main():
                 if proc.poll() is not None:
                     log("tunnel down, redial"); break
                 time.sleep(5)
+                if os.path.exists(BASE + "/redial"):   # 面板请求更换 IP
+                    try: os.remove(BASE + "/redial")
+                    except Exception: pass
+                    log("redial requested, switching node"); break
                 try:
                     cc = open(COUNTRY_F).read().strip().upper() or "JP"
                     if cc != country:
@@ -266,6 +275,14 @@ def main():
                     else:
                         log("recheck fail, redial"); kill_cur(); break
             kill_cur(); dead.add(r.get("IP")); break   # 断开/换国后回主循环
+        if not tried:   # 候选全被拉黑（如换 IP 时该国节点少）→ 清空黑名单重试
+            if dead:
+                dead.clear()
+                _state.update(msg="all candidates tried, blacklist reset")
+                write_status(country)
+                log("all candidates blacklisted, reset")
+            time.sleep(15)
+            continue
         time.sleep(3)
 
 if __name__ == "__main__":
@@ -334,6 +351,12 @@ ip link del resi_tun 2>/dev/null || true
 rm -rf /opt/nexpanel-resi /etc/nexpanel-resi /etc/systemd/system/nexpanel-resi.service
 systemctl daemon-reload 2>/dev/null || true
 echo UNINSTALL_DONE
+'''
+
+REDIAL_SH = '''mkdir -p /etc/nexpanel-resi
+touch /etc/nexpanel-resi/redial
+systemctl is-active nexpanel-resi
+echo REDIAL_SIGNAL
 '''
 
 _status_cache = {}  # node_id -> (ts, status dict)
@@ -412,11 +435,11 @@ async def set_country(node, country: str) -> str:
     return await _run(node, SET_COUNTRY_SH.format(country=country), timeout=120)
 
 
-async def get_status(node) -> dict:
-    """查节点宿主住宅服务状态（30s 缓存）"""
+async def get_status(node, ttl: float = 30) -> dict:
+    """查节点宿主住宅服务状态（默认 30s 缓存；轮询场景传小 ttl 绕缓存）"""
     key = node.get("id") if isinstance(node, dict) else node
     ts, data = _status_cache.get(key, (0.0, None))
-    if data is not None and time.time() - ts < 30:
+    if data is not None and time.time() - ts < ttl:
         return data
     try:
         out = await _run(node, STATUS_SH, timeout=90)
@@ -448,4 +471,27 @@ async def cached_host_status(node_id, node):
 async def uninstall(node) -> str:
     _status_cache.pop(node.get("id", 0), None)
     return await _run(node, UNINSTALL_SH, timeout=120)
+
+
+async def redial(node, max_wait: float = 110) -> dict:
+    """同国家内更换住宅 IP：touch 信号文件（agent watchdog ≤5s 内感知，
+    断开当前隧道→拉黑旧节点→优选下一个候选），轮询直到就绪。
+    不 restart 服务，网桥/应用侧无感。返回 {ok, changed, ...status}"""
+    import asyncio
+    old = (await get_status(node)).get("egress_ip") or ""
+    out = await _run(node, REDIAL_SH, timeout=60)
+    if "REDIAL_SIGNAL" not in out and "active" not in out:
+        raise RuntimeError("节点住宅服务未运行: %s" % out[-120:])
+    deadline = time.time() + max_wait
+    last = {}
+    while time.time() < deadline:
+        await asyncio.sleep(6)
+        st = await get_status(node, ttl=6)
+        last = st
+        # 就绪且 IP 已变化才算完成（旧状态也是 ready，不能只看 state）
+        if st.get("state") == "ready" and (not old or st.get("egress_ip") != old):
+            return {"ok": True, "changed": bool(old), **st}
+    if last.get("state") == "ready":   # 超时但已就绪：IP 未变（如该国仅一个节点，重连回原节点）
+        return {"ok": True, "changed": False, **last}
+    return {"ok": False, "changed": False, **last}
 

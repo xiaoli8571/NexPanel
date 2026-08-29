@@ -979,6 +979,7 @@ async def get_egress(app_id: int, user: dict = Depends(current_user)):
     if eg.get("resi_user"):
         eg["resi_user_set"] = True
     node_residential = None
+    egress_node_id = None
     if eg.get("mode") == "residential" and eg.get("country"):
         node_id = a["node_id"]
         if a["container_id"]:
@@ -989,8 +990,10 @@ async def get_egress(app_id: int, user: dict = Depends(current_user)):
             if node:
                 from . import residential as resi_mod
                 node_residential = await resi_mod.get_status(dict(node))
+                egress_node_id = node_id
     return {"app_id": app_id, "name": a["name"], "egress": eg,
             "egress_state": params.get("egress_state") or {},
+            "egress_node_id": egress_node_id,
             "node_residential": node_residential}
 
 
@@ -1058,6 +1061,35 @@ async def node_residential(nid: int, user: dict = Depends(current_user)):
         raise HTTPException(404, "节点不存在")
     from . import residential as resi_mod
     return {"node_id": nid, **(await resi_mod.get_status(dict(node)))}
+
+
+@router.post("/nodes/{nid}/residential/deploy")
+async def node_residential_deploy(nid: int, request: Request,
+                                  admin: dict = Depends(require_admin)):
+    """幂等部署/更新节点宿主住宅 agent（安装依赖 + systemd 拉起，agent 版本升级通道）"""
+    node = db.one("SELECT * FROM nodes WHERE id=?", (nid,))
+    if not node or node["kind"] not in ("agent", "ssh"):
+        raise HTTPException(404, "节点不存在或未接入")
+    from . import residential as resi_mod
+    out = await resi_mod.deploy_residential(dict(node))
+    db.audit(admin["sub"], "部署节点住宅服务", node["name"], "", request.client.host)
+    return {"node_id": nid, "output": out[-200:]}
+
+
+@router.post("/nodes/{nid}/residential/redial")
+async def node_residential_redial(nid: int, request: Request,
+                                  admin: dict = Depends(require_admin)):
+    """同国家内更换住宅 IP：断开当前隧道→拉黑旧节点→优选下一个候选（节点级）"""
+    node = db.one("SELECT * FROM nodes WHERE id=?", (nid,))
+    if not node or node["kind"] not in ("agent", "ssh"):
+        raise HTTPException(404, "节点不存在或未接入")
+    from . import residential as resi_mod
+    result = await resi_mod.redial(dict(node))
+    db.audit(admin["sub"], "更换住宅 IP",
+             f"{node['name']} → {result.get('egress_ip') or '未完成'}"
+             + ("（已变化）" if result.get("changed") else ""),
+             "", request.client.host)
+    return {"node_id": nid, **result}
 
 
 @router.delete("/nodes/{nid}/residential")

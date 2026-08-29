@@ -1346,6 +1346,9 @@ window.openEgressModal = async function(appId){
         </select>
       </div>
       <p id="eg-resi-status" style="color:var(--muted);font-size:11px;margin-top:6px;line-height:1.6">${resiStatusLine(cur.node_residential, eg.country)}</p>
+      ${cur.egress_node_id && cur.node_residential && cur.node_residential.state==="ready" ? `
+      <div style="margin-top:4px"><button class="btn sm" id="eg-resi-redial">🔄 更换当前住宅 IP</button>
+      <span style="font-size:11px;color:var(--muted);margin-left:6px">同国家换一个志愿者节点，约 1 分钟</span></div>`:""}
       <div style="border-top:1px dashed var(--line);margin:9px 0"></div>
       <label style="font-size:12px;color:var(--muted);display:block">或：自定义上游代理（商业住宅代理商的 SOCKS5/HTTP 入口，填了则优先于选国家）</label>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
@@ -1396,6 +1399,18 @@ window.openEgressModal = async function(appId){
       sel.insertAdjacentHTML("beforeend", `<option value="${cur}">${esc(fb[cur]||cur)}（当前无在线节点，不推荐）</option>`);
     sel.value = cur;
   }).catch(()=>{});
+  // 更换住宅 IP（同国家重拨，节点级）
+  const rdBtn = ov.querySelector("#eg-resi-redial");
+  if(rdBtn) rdBtn.onclick = async ()=>{
+    rdBtn.disabled = true; rdBtn.textContent = "🔄 重拨中（约 1 分钟）…";
+    try{
+      const r = await api(`/nodes/${cur.egress_node_id}/residential/redial`, "POST");
+      const stEl = ov.querySelector("#eg-resi-status");
+      if(stEl) stEl.innerHTML = resiStatusLine(r, r.country);
+      rdBtn.textContent = r.ok ? (r.changed ? `✅ 已更换 → ${r.egress_ip}` : "⚠️ 已重拨但 IP 未变（该国可能仅此节点）") : "⚠️ 重拨超时，agent 会自动继续";
+    }catch(e){ rdBtn.textContent = "⚠️ " + (e.message || "失败"); }
+    setTimeout(()=>{ rdBtn.disabled = false; rdBtn.textContent = "🔄 更换当前住宅 IP"; }, 4000);
+  };
   const save = async (modeOverride)=>{
     const mode = modeOverride || ov.querySelector("input[name=eg-mode]:checked").value;
     const body = {mode};
