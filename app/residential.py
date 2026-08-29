@@ -312,7 +312,8 @@ command -v curl >/dev/null 2>&1 || {{
 }}
 echo {agent_b64} | base64 -d > /opt/nexpanel-resi/resi_agent.py
 [ -f /etc/nexpanel-resi/country ] || echo JP > /etc/nexpanel-resi/country
-cat > /etc/systemd/system/nexpanel-resi.service <<'EOF_UNIT'
+if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+  cat > /etc/systemd/system/nexpanel-resi.service <<'EOF_UNIT'
 [Unit]
 Description=NexPanel Residential Egress (VPN Gate)
 After=network-online.target
@@ -326,36 +327,62 @@ KillMode=mixed
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
-systemctl daemon-reload
-systemctl enable --now nexpanel-resi >/dev/null 2>&1 || systemctl restart nexpanel-resi
+  systemctl daemon-reload
+  systemctl enable --now nexpanel-resi >/dev/null 2>&1 || systemctl restart nexpanel-resi
+else
+  cat > /etc/init.d/nexpanel-resi <<'EOF_INIT'
+#!/sbin/openrc-run
+name="nexpanel-resi"
+description="NexPanel Residential Egress (VPN Gate)"
+command="/usr/bin/python3"
+command_args="/opt/nexpanel-resi/resi_agent.py"
+command_background="yes"
+pidfile="/run/nexpanel-resi.pid"
+output_log="/var/log/nexpanel-resi.log"
+error_log="/var/log/nexpanel-resi.log"
+
+depend() {{
+    want net
+}}
+EOF_INIT
+  chmod +x /etc/init.d/nexpanel-resi
+  rc-update add nexpanel-resi default 2>/dev/null || true
+  rc-service nexpanel-resi restart 2>/dev/null || rc-service nexpanel-resi start
+fi
 sleep 2
-systemctl is-active nexpanel-resi
+SVC_ACTIVE() {{ if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then systemctl is-active nexpanel-resi 2>/dev/null || echo inactive; else rc-service nexpanel-resi status >/dev/null 2>&1 && echo active || echo inactive; fi; }}
+SVC_ACTIVE
 echo DEPLOY_DONE
 '''
 
 SET_COUNTRY_SH = '''mkdir -p /etc/nexpanel-resi
 echo "{country}" > /etc/nexpanel-resi/country
-systemctl restart nexpanel-resi 2>/dev/null || {{ echo NO_SERVICE; exit 1; }}
+SVC_RESTART() {{ if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then systemctl restart nexpanel-resi 2>/dev/null || {{ echo NO_SERVICE; exit 1; }}; else rc-service nexpanel-resi restart 2>/dev/null || {{ echo NO_SERVICE; exit 1; }}; fi; }}
+SVC_RESTART
 sleep 1
-systemctl is-active nexpanel-resi
+SVC_ACTIVE() {{ if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then systemctl is-active nexpanel-resi 2>/dev/null || echo inactive; else rc-service nexpanel-resi status >/dev/null 2>&1 && echo active || echo inactive; fi; }}
+SVC_ACTIVE
 echo COUNTRY_SET_{country}
 '''
 
-STATUS_SH = '''echo "SERVICE:$(systemctl is-active nexpanel-resi 2>/dev/null || echo inactive)"
+STATUS_SH = '''SVC_ACTIVE() {{ if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then systemctl is-active nexpanel-resi 2>/dev/null || echo inactive; else rc-service nexpanel-resi status >/dev/null 2>&1 && echo active || echo inactive; fi; }}
+echo "SERVICE:$(SVC_ACTIVE)"
 cat /etc/nexpanel-resi/status.json 2>/dev/null || echo "{{}}"
 '''
 
-UNINSTALL_SH = '''systemctl disable --now nexpanel-resi 2>/dev/null || true
+UNINSTALL_SH = '''SVC_STOP() {{ if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then systemctl disable --now nexpanel-resi 2>/dev/null || true; else rc-service nexpanel-resi stop 2>/dev/null || true; rc-update del nexpanel-resi default 2>/dev/null || true; fi; }}
+SVC_STOP
 pkill -f resi_agent.py 2>/dev/null || true
 ip link del resi_tun 2>/dev/null || true
-rm -rf /opt/nexpanel-resi /etc/nexpanel-resi /etc/systemd/system/nexpanel-resi.service
-systemctl daemon-reload 2>/dev/null || true
+rm -rf /opt/nexpanel-resi /etc/nexpanel-resi /etc/systemd/system/nexpanel-resi.service /etc/init.d/nexpanel-resi
+command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 echo UNINSTALL_DONE
 '''
 
 REDIAL_SH = '''mkdir -p /etc/nexpanel-resi
 touch /etc/nexpanel-resi/redial
-systemctl is-active nexpanel-resi
+SVC_ACTIVE() {{ if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then systemctl is-active nexpanel-resi 2>/dev/null || echo inactive; else rc-service nexpanel-resi status >/dev/null 2>&1 && echo active || echo inactive; fi; }}
+SVC_ACTIVE
 echo REDIAL_SIGNAL
 '''
 
@@ -442,7 +469,7 @@ async def get_status(node, ttl: float = 30) -> dict:
     if data is not None and time.time() - ts < ttl:
         return data
     try:
-        out = await _run(node, STATUS_SH, timeout=90)
+        out = await _run(node, STATUS_SH.format(), timeout=90)
         service = "unknown"
         status = {}
         for line in out.splitlines():
@@ -470,7 +497,7 @@ async def cached_host_status(node_id, node):
 
 async def uninstall(node) -> str:
     _status_cache.pop(node.get("id", 0), None)
-    return await _run(node, UNINSTALL_SH, timeout=120)
+    return await _run(node, UNINSTALL_SH.format(), timeout=120)
 
 
 async def redial(node, max_wait: float = 110) -> dict:
@@ -479,7 +506,7 @@ async def redial(node, max_wait: float = 110) -> dict:
     不 restart 服务，网桥/应用侧无感。返回 {ok, changed, ...status}"""
     import asyncio
     old = (await get_status(node)).get("egress_ip") or ""
-    out = await _run(node, REDIAL_SH, timeout=60)
+    out = await _run(node, REDIAL_SH.format(), timeout=60)
     if "REDIAL_SIGNAL" not in out and "active" not in out:
         raise RuntimeError("节点住宅服务未运行: %s" % out[-120:])
     deadline = time.time() + max_wait
