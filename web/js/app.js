@@ -1211,11 +1211,13 @@ async function loadApps(){
         const link = (a.links || [])[i] || "";
         const proto = s.protocol || s.type || "?";
         const port = s.port || "";
+        const egBtn = i===0 ? `<button class="btn sm ghost" data-egress="${a.id}" title="出口：WARP / 住宅代理">${egressBtnLabel(a)}</button>` : "";
         rows.push(`<tr>
           <td><span class="tag">${esc(proto)}</span></td>
           <td class="mono">${port}</td>
           <td><span class="badge running"><span class="dot"></span>运行中</span></td>
           <td><div class="actions-cell">
+            ${egBtn}
             ${link?`<button class="btn sm" onclick='copyText(${JSON.stringify(link)})'>复制</button>`:""}
             <button class="btn sm warn" data-del-node="${a.id}" data-idx="${i}" title="删除该单个节点">${icon("trash",12)} 删除</button>
             <button class="btn sm ghost" data-del-app="${a.id}" title="删除整组(该应用全部节点)">整组</button>
@@ -1276,6 +1278,8 @@ async function loadApps(){
       }catch(e){ toast(e.message,"err",5000); }
     };
 
+    $$("#apps-container [data-egress]").forEach(b=>b.onclick=()=>openEgressModal(+b.dataset.egress));
+
     $$("#apps-container [data-del-node]").forEach(b=>b.onclick=async()=>{
       const appId = +b.dataset.delNode, idx = +b.dataset.idx;
       if(!(await confirmModal("删除该单个代理节点？将重新生成 sing-box 配置并重启，只移除这一个节点。", true))) return;
@@ -1292,6 +1296,91 @@ async function loadApps(){
       catch(e){ toast(e.message,"err"); }
     });
   }catch(e){}
+}
+
+/* ── 应用出口（WARP / 住宅代理） ── */
+function egressBtnLabel(a){
+  const m = (a.egress||{}).mode || "native";
+  const st = (a.egress_state||{}).status || "";
+  const flag = st==="pending" ? " ⏳" : st==="error" ? " ⚠️" : (m!=="native" ? " ✓" : "");
+  const name = m==="warp_ipv4" ? "WARP·v4" : m==="warp_ipv6" ? "WARP·v6" :
+               m==="warp_dual" ? "WARP·双栈" : m==="residential" ? "住宅" : "出口";
+  return `🌍 ${name}${flag}`;
+}
+
+window.openEgressModal = async function(appId){
+  let cur = {egress:{mode:"native"}, egress_state:{}, name:""};
+  try{ cur = await api(`/apps/${appId}/egress`); }catch(e){ toast(e.message,"err"); return; }
+  const eg = cur.egress || {mode:"native"};
+  const state = cur.egress_state || {};
+  const stLine = state.ts ? (state.status==="applied" ? `✅ 已应用（${new Date(state.ts*1000).toLocaleString()}）`
+                        : state.status==="pending" ? "⏳ 应用中…" : `⚠️ 失败：${esc(state.error||"")}`) : "未配置过";
+  const ov = openModal(`🌍 出口配置 — ${esc(cur.name||("应用 #"+appId))}`, `
+    <p style="color:var(--muted);font-size:12.5px;line-height:1.7">
+      出站流量模式：该应用（及其所在机器的全部应用）的出站可走 <b>Cloudflare WARP</b>（获得 WARP IPv4/IPv6 出口，无需系统级安装）或 <b>住宅代理</b>（SOCKS5/HTTP，ISP 住宅 IP）。
+      当前状态：${stLine}</p>
+    <label style="display:block;font-size:12px;color:var(--muted);margin-top:6px">出口模式</label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px" id="eg-modes">
+      ${[["native","🌐 原生出口"],["warp_ipv4","🟦 WARP IPv4"],["warp_ipv6","🟩 WARP IPv6"],["warp_dual","🟪 WARP 双栈"],["residential","🏠 住宅代理"]]
+        .map(([v,l])=>`<label class="tag" style="cursor:pointer;padding:7px 10px;border:1px solid var(--line);border-radius:9px">
+          <input type="radio" name="eg-mode" value="${v}" ${eg.mode===v?"checked":""} style="margin-right:4px">${l}</label>`).join("")}
+    </div>
+    <div id="eg-resi-box" style="display:none;margin-top:10px;padding:10px;border:1px dashed var(--line);border-radius:10px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <select class="input" id="eg-resi-proto" style="width:110px">
+          <option value="socks5" ${eg.resi_proto==="http"?"":"selected"}>SOCKS5</option>
+          <option value="http" ${eg.resi_proto==="http"?"selected":""}>HTTP</option>
+        </select>
+        <input class="input" id="eg-resi-addr" placeholder="地址 如 proxy.isp.com" style="flex:1;min-width:150px" value="${esc(eg.resi_addr||"")}">
+        <input class="input" id="eg-resi-port" type="number" min="1" max="65535" placeholder="端口" style="width:90px" value="${eg.resi_port||""}">
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <input class="input" id="eg-resi-user" placeholder="用户名（可选）" style="flex:1;min-width:130px" value="${esc(eg.resi_user||"")}">
+        <input class="input" id="eg-resi-pass" type="password" placeholder="密码（可选）" style="flex:1;min-width:130px" value="${esc(eg.resi_pass||"")}">
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <select class="input" id="eg-resi-mode" style="width:130px">
+          <option value="global" ${(eg.resi_mode||"global")==="global"?"selected":""}>全局接管</option>
+          <option value="selective" ${eg.resi_mode==="selective"?"selected":""}>按域名分流</option>
+        </select>
+        <input class="input" id="eg-resi-domains" placeholder="分流域名后缀，逗号分隔：openai.com,netflix.com" style="flex:1;min-width:170px" value="${esc(eg.resi_domains||"")}">
+      </div>
+      <p style="color:var(--muted);font-size:11px;margin-top:6px;line-height:1.6">全局接管=该应用全部流量走住宅 IP；按域名分流=仅命中后缀的域名走住宅，其余直连。填住宅代理商的 SOCKS5/HTTP 入口即可。</p>
+    </div>
+    <p style="color:var(--muted);font-size:11.5px;margin-top:10px;line-height:1.7">
+      · WARP 每应用独立注册 Cloudflare 设备（首次保存时自动完成）<br>
+      · 同一台机器上多个应用时，以第一个配置了出口的应用为准<br>
+      · 保存后自动重下发 sing-box 配置并重启，客户端无需改链接</p>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn primary" id="btn-eg-save" style="flex:1">保存并应用</button>
+      ${eg.mode!=="native"?`<button class="btn ghost" id="btn-eg-native">恢复原生</button>`:""}
+    </div>`,
+    null, "", {wide:true});
+  ov.querySelector(".modal-foot").remove();
+  const box = ov.querySelector("#eg-resi-box");
+  const syncResi = ()=>{ box.style.display = ov.querySelector("input[name=eg-mode]:checked").value==="residential" ? "" : "none"; };
+  ov.querySelectorAll("input[name=eg-mode]").forEach(r=>r.onchange=syncResi);
+  syncResi();
+  const save = async (modeOverride)=>{
+    const mode = modeOverride || ov.querySelector("input[name=eg-mode]:checked").value;
+    const body = {mode};
+    if(mode==="residential"){
+      body.resi_proto = ov.querySelector("#eg-resi-proto").value;
+      body.resi_addr = ov.querySelector("#eg-resi-addr").value.trim();
+      body.resi_port = +ov.querySelector("#eg-resi-port").value || 0;
+      body.resi_user = ov.querySelector("#eg-resi-user").value.trim();
+      body.resi_pass = ov.querySelector("#eg-resi-pass").value;
+      body.resi_mode = ov.querySelector("#eg-resi-mode").value;
+      body.resi_domains = ov.querySelector("#eg-resi-domains").value.trim();
+    }
+    try{
+      await api(`/apps/${appId}/egress`,{method:"POST",body});
+      closeModal(); toast("出口配置已下发，正在应用…","ok",4000); loadApps();
+    }catch(e){ toast(e.message,"err",5000); }
+  };
+  ov.querySelector("#btn-eg-save").onclick = ()=>save();
+  const btnNat = ov.querySelector("#btn-eg-native");
+  if(btnNat) btnNat.onclick = ()=>save("native");
 }
 
 /* ── 订阅中心弹窗 ── */

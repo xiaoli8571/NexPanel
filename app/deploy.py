@@ -601,6 +601,16 @@ async def _sync_machine_singbox(container_id: int | None, node_id: int,
                 pass
         return False
     conf = build_singbox_config(specs)
+    # 出口注入：同一机器上有应用配置了 WARP/住宅代理时，出站改走对应 outbound
+    from . import egress as egress_mod
+    eg, eg_app_id = egress_mod.machine_egress(container_id, node_id)
+    eg_note = "原生出口"
+    if eg:
+        conf, eg_note = egress_mod.apply_egress(conf, eg, eg_app_id)
+    try:
+        _log(j, f"[EGRESS] {eg_note}")
+    except Exception:
+        pass
     host_target = container_id is None
     rc, out = await _apply_singbox_config(node, container, conf, host_target, j)
     if "[OK]" not in out:

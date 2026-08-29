@@ -1,7 +1,9 @@
 """REST API 路由（多节点版）"""
+import asyncio
 import json
 import os
 import re
+import time
 import uuid as uuidlib
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -871,6 +873,111 @@ def apps_catalog(user: dict = Depends(current_user)):
             for k, v in deploy_mod.CATALOG.items()]
 
 
+# ────────────── 应用出口（WARP / 住宅代理） ──────────────
+
+def _app_row(app_id: int) -> dict:
+    a = db.one("SELECT * FROM apps WHERE id=?", (app_id,))
+    if not a:
+        raise HTTPException(404, "应用不存在")
+    return a
+
+
+def _set_egress_state(app_id: int, status: str, error: str = ""):
+    a = _app_row(app_id)
+    try:
+        params = json.loads(a["params"] or "{}")
+    except Exception:
+        params = {}
+    params["egress_state"] = {"status": status, "error": error[:500],
+                              "ts": int(time.time())}
+    db.q("UPDATE apps SET params=? WHERE id=?", (json.dumps(params), app_id))
+
+
+async def _apply_egress_task(app_id: int, container_id, node_id):
+    """后台重下发该机器 sing-box 配置并回写应用状态"""
+    from . import deploy as deploy_mod
+    try:
+        node = db.one("SELECT * FROM nodes WHERE id=?", (node_id,)) if node_id else None
+        container = db.one("SELECT * FROM containers WHERE id=?", (container_id,)) if container_id else None
+        if container and not node:
+            node = db.one("SELECT * FROM nodes WHERE id=?", (container["node_id"],))
+        if not node:
+            raise RuntimeError("节点不存在或未接入")
+        ok = await deploy_mod._sync_machine_singbox(
+            container_id, node_id, dict(node),
+            dict(container) if container else None,
+            {"id": f"egress-{app_id}", "log": [], "status": "", "result": None})
+        _set_egress_state(app_id, "applied" if ok else "applied",
+                          "" if ok else "机器上无活动应用，sing-box 已停止")
+    except Exception as e:
+        _set_egress_state(app_id, "error", str(e))
+
+
+class EgressIn(BaseModel):
+    mode: str = "native"
+    resi_proto: str = "socks5"
+    resi_addr: str = ""
+    resi_port: int = 0
+    resi_user: str = ""
+    resi_pass: str = ""
+    resi_mode: str = "global"
+    resi_domains: str = ""
+
+
+@router.get("/apps/{app_id}/egress")
+def get_egress(app_id: int, user: dict = Depends(current_user)):
+    a = _app_row(app_id)
+    try:
+        params = json.loads(a["params"] or "{}")
+    except Exception:
+        params = {}
+    eg = dict(params.get("egress") or {"mode": "native"})
+    if eg.get("resi_pass"):
+        eg["resi_pass_set"] = True
+        eg["resi_pass"] = "******"
+    if eg.get("resi_user"):
+        eg["resi_user_set"] = True
+    return {"app_id": app_id, "name": a["name"], "egress": eg,
+            "egress_state": params.get("egress_state") or {}}
+
+
+@router.post("/apps/{app_id}/egress")
+async def set_egress(app_id: int, body: EgressIn, request: Request,
+                     admin: dict = Depends(require_admin)):
+    from . import egress as egress_mod
+    a = _app_row(app_id)
+    if a["status"] != "done":
+        raise HTTPException(400, "应用尚未部署完成")
+    try:
+        params = json.loads(a["params"] or "{}")
+    except Exception:
+        params = {}
+    old_mode = (params.get("egress") or {}).get("mode", "native")
+    # 前端把已存密码脱敏为 ******，原样传回时恢复真实值
+    if body.resi_pass == "******":
+        body.resi_pass = (params.get("egress") or {}).get("resi_pass", "")
+    try:
+        eg = egress_mod.normalize(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if eg["mode"] == "native" and old_mode.startswith("warp_"):
+        egress_mod.warp_drop(app_id)   # 不再用 WARP，清理注册凭据
+    params["egress"] = eg
+    params["egress_state"] = {"status": "pending", "error": "", "ts": int(time.time())}
+    db.q("UPDATE apps SET params=? WHERE id=?", (json.dumps(params), app_id))
+    container_id = a["container_id"]
+    node_id = a["node_id"]
+    if container_id:
+        c = db.one("SELECT node_id FROM containers WHERE id=?", (container_id,))
+        node_id = c["node_id"] if c else node_id
+    asyncio.create_task(_apply_egress_task(app_id, container_id, node_id))
+    db.audit(admin["sub"], "配置应用出口",
+             f"{a['name']} → {egress_mod.MODE_LABELS.get(eg['mode'], eg['mode'])}",
+             "", request.client.host)
+    return {"ok": True, "mode": eg["mode"], "state": "pending",
+            "warp_reg_cached": old_mode.startswith("warp_") and eg["mode"].startswith("warp_")}
+
+
 @router.get("/apps")
 def list_apps(user: dict = Depends(current_user)):
     rows = db.q("""
@@ -893,6 +1000,14 @@ def list_apps(user: dict = Depends(current_user)):
         except Exception:
             d["spec"] = []
         d["public_ip"] = params.get("public_ip", "")
+        try:
+            d["egress"] = params.get("egress") or {"mode": "native"}
+        except Exception:
+            d["egress"] = {"mode": "native"}
+        try:
+            d["egress_state"] = params.get("egress_state") or {}
+        except Exception:
+            d["egress_state"] = {}
         try:
             d["links"] = json.loads(d["links"] or "[]")
         except Exception:

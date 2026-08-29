@@ -97,10 +97,15 @@ def collect_specs() -> list[dict]:
         if not spec:
             continue
         pub_ip = params.get("public_ip") or ""
+        eg = (params.get("egress") or {}).get("mode", "native")
+        eg_tag = {"warp_ipv4": "WARP·v4", "warp_ipv6": "WARP·v6",
+                  "warp_dual": "WARP·双栈", "residential": "住宅"}.get(eg, "")
         for n in spec:
             n = dict(n)
             n["_app"] = r["name"]
             n["_ip"] = pub_ip
+            if eg_tag:
+                n["_egress"] = eg_tag
             out.append(n)
     return out
 
@@ -192,6 +197,8 @@ def build_clash_yaml(specs: list[dict], sub_title="NexPanel") -> str:
     used = set()
     for i, n in enumerate(specs):
         base = f"{n.get('_app', 'node')}-{n['protocol']}"
+        if n.get("_egress"):
+            base = f"{base}·{n['_egress']}"
         nm, k = base, 2
         while nm in used:
             nm, k = f"{base}#{k}", k + 1
