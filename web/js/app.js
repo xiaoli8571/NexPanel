@@ -1456,7 +1456,7 @@ window.openSubModal = async function(){
           <button class="btn primary sm" id="btn-sub-tr-save">保存</button>
           <button class="btn ghost sm" id="btn-sub-tr-clear">重置</button>
         </div>
-        <p style="color:var(--muted);font-size:11px;margin-top:4px;line-height:1.6">手动填了剩余流量则客户端显示 0 / 剩余值；留空显示 0 / 9999 GB。「重置」= 清除手动设定。</p>
+        <p style="color:var(--muted);font-size:11px;margin-top:4px;line-height:1.6">已使用 = 订阅内节点真实流量统计（当前 <b>${tr.used_gb ?? 0} GB</b>，自动更新）；填了剩余流量 → 显示 已使用 / 已使用+剩余；留空 → 显示 已使用 / 9999 GB。「重置」= 清除手动设定。</p>
       </div>
       <p style="color:var(--muted);font-size:11.5px;margin-top:12px;line-height:1.7">
         · 新部署节点后客户端刷新订阅即可拉取<br>
@@ -1990,7 +1990,7 @@ async function viewSettings(){
           </div>`).join("") : `<span class="empty">还没有订阅源，贴一个机场链接或点“粘贴内容预览”</span>`;
         subconvList.querySelectorAll("[data-subconv-traffic]").forEach(b=>b.onclick=async ()=>{
           const id=b.dataset.subconvTraffic;
-          const rem=prompt("剩余流量（GB）\n留空 = 显示 9999G，输入后客户端显示 0 / 该值：", b.dataset.rem||"");
+          const rem=prompt("剩余流量（GB）\n留空 = 透传机场真实流量（无则 9999G）；\n填写 = 已使用(机场真实) / 已使用+此值：", b.dataset.rem||"");
           if(rem===null) return;
           const exp=prompt("到期日期 YYYY-MM-DD（可选，留空 = 不显示）：", b.dataset.exp||"");
           if(exp===null) return;

@@ -15,6 +15,7 @@
 """
 import base64
 import json
+import re
 import secrets
 import time
 import urllib.parse as up
@@ -705,19 +706,41 @@ def _expire_epoch(expire: str) -> int:
         return 0
 
 
+def _parse_userinfo(ui: str) -> dict:
+    """解析 subscription-userinfo 串 → {'upload','download','total','expire'}（字节/秒，int）"""
+    out: dict[str, int] = {}
+    for part in re.split(r"[;\s]+", (ui or "").strip()):
+        k, sep, v = part.partition("=")
+        if sep and k.strip().lower() in ("upload", "download", "total", "expire"):
+            try:
+                out[k.strip().lower()] = int(float(v.strip()))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def userinfo_header(remaining_gb, expire: str = "", upstream: str = "") -> str:
-    """组装 subscription-userinfo 头。
-    优先级：手动剩余流量(used=0,total=剩余) > 上游透传 > 默认 9999G(used=0)"""
-    exp = f"; expire={_expire_epoch(expire)}" if (expire or "").strip() else ""
+    """组装 subscription-userinfo 头（客户端「已使用」= upload+download）。
+    优先级：手动剩余流量 > 上游机场透传 > 默认 9999G。
+    已使用始终保留：手动模式下取上游真实已用（若有），total = 已使用 + 手动剩余
+    → 客户端「剩余」显示手动值、「已使用」显示机场真实值。"""
+    manual = None
     try:
         if remaining_gb is not None and str(remaining_gb).strip() != "":
-            total = max(1, int(float(remaining_gb) * _GIB))
-            return f"upload=0; download=0; total={total}{exp}"
+            manual = int(float(remaining_gb) * _GIB)
     except (TypeError, ValueError):
         pass
-    upstream = (upstream or "").strip()
-    if upstream and "total=" in upstream:
-        return upstream
+    up = _parse_userinfo(upstream)
+    if manual is not None:
+        u, d = up.get("upload", 0), up.get("download", 0)
+        total = (u + d) + max(1, manual)
+        # 到期：手动填的优先，否则沿用上游的
+        exp_epoch = _expire_epoch(expire) if (expire or "").strip() else up.get("expire", 0)
+        exp = f"; expire={exp_epoch}" if exp_epoch else ""
+        return f"upload={u}; download={d}; total={total}{exp}"
+    if up.get("total"):
+        return (upstream or "").strip()          # 纯透传：机场真实已使用+总量
+    exp = f"; expire={_expire_epoch(expire)}" if (expire or "").strip() else ""
     return f"upload=0; download=0; total={DEFAULT_TOTAL_GB * _GIB}{exp}"
 
 

@@ -46,14 +46,31 @@ DEFAULT_TOTAL_GB = 9999
 _GIB = 1024 ** 3
 
 
+def _sub_used_bytes() -> tuple[int, int]:
+    """订阅「已使用」真实流量：只统计订阅内节点（有 status='done' 应用的节点，
+    与 collect_specs 同口径）的 traffic_daily 汇总。返回 (upload=Σtx, download=Σrx)。"""
+    try:
+        row = db.one(
+            "SELECT SUM(t.tx_bytes) AS tx, SUM(t.rx_bytes) AS rx FROM traffic_daily t "
+            "WHERE t.node_id IN (SELECT DISTINCT node_id FROM apps "
+            "                    WHERE status='done' AND node_id IS NOT NULL)")
+        if row:
+            return int(row["tx"] or 0), int(row["rx"] or 0)
+    except Exception:
+        pass          # 表不存在（未初始化流量统计）等场景 → 视为 0
+    return 0, 0
+
+
 def get_sub_traffic() -> dict:
-    """面板订阅流量显示设置 {'remaining_gb': float|None, 'expire': 'YYYY-MM-DD'|''}"""
+    """面板订阅流量显示设置 {'remaining_gb': float|None, 'expire': str, 'used_gb': float}"""
     rem = get_setting("sub_userinfo_remaining")
     try:
         rem = float(rem) if rem not in (None, "") else None
     except (TypeError, ValueError):
         rem = None
-    return {"remaining_gb": rem, "expire": get_setting("sub_userinfo_expire") or ""}
+    up, down = _sub_used_bytes()
+    return {"remaining_gb": rem, "expire": get_setting("sub_userinfo_expire") or "",
+            "used_gb": round((up + down) / _GIB, 2)}
 
 
 def set_sub_traffic(remaining_gb, expire: str = ""):
@@ -64,13 +81,20 @@ def set_sub_traffic(remaining_gb, expire: str = ""):
 
 
 def userinfo_header() -> str:
-    """subscription-userinfo 头：手动剩余流量优先，否则 upload=0;download=0;total=9999G"""
+    """subscription-userinfo 头（客户端「已使用」= upload+download）。
+
+    已使用 = 订阅内节点真实流量统计；
+    手动剩余流量 → total = 已使用 + 剩余（客户端「剩余」显示手动值、「已使用」显示真实值）；
+    留空 → total = 9999G（剩余 = 9999G - 已使用，随用量递减）。"""
     t = get_sub_traffic()
+    up, down = _sub_used_bytes()
+    used = up + down
     exp = f"; expire={_expire_epoch(t['expire'])}" if t["expire"] else ""
-    total = DEFAULT_TOTAL_GB * _GIB
     if t["remaining_gb"] is not None:
-        total = max(1, int(t["remaining_gb"] * _GIB))
-    return f"upload=0; download=0; total={total}{exp}"
+        total = used + max(1, int(t["remaining_gb"] * _GIB))
+    else:
+        total = max(DEFAULT_TOTAL_GB * _GIB, used + _GIB)   # 剩余恒 ≥1G，防负数
+    return f"upload={up}; download={down}; total={total}{exp}"
 
 
 def _expire_epoch(expire: str) -> int:
