@@ -42,9 +42,11 @@ def one(sql: str, *p):
 
 
 def ex(sql: str, *p):
+    """执行写操作并提交；返回 lastrowid（INSERT 场景拿新行主键，避免竞态）"""
     with _lock:
-        _conn.execute(sql, _norm(p))
+        cur = _conn.execute(sql, _norm(p))
         _conn.commit()
+        return cur.lastrowid
 
 
 def now() -> str:

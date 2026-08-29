@@ -1404,7 +1404,7 @@ window.openEgressModal = async function(appId){
   if(rdBtn) rdBtn.onclick = async ()=>{
     rdBtn.disabled = true; rdBtn.textContent = "🔄 重拨中（约 1 分钟）…";
     try{
-      const r = await api(`/nodes/${cur.egress_node_id}/residential/redial`, "POST");
+      const r = await api(`/nodes/${cur.egress_node_id}/residential/redial`, {method:"POST"});
       const stEl = ov.querySelector("#eg-resi-status");
       if(stEl) stEl.innerHTML = resiStatusLine(r, r.country);
       rdBtn.textContent = r.ok ? (r.changed ? `✅ 已更换 → ${r.egress_ip}` : "⚠️ 已重拨但 IP 未变（该国可能仅此节点）") : "⚠️ 重拨超时，agent 会自动继续";

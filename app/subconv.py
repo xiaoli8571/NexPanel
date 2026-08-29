@@ -560,8 +560,8 @@ def _clash_proxy_block(n: dict) -> str | None:
             w("alpn", n["alpn"])
     else:
         return None
-    if n.get("tls") or typ == "vless":
-        if typ == "vless":
+    if typ == "vless":
+        if n.get("tls"):                      # 无 TLS 的 vless(ws/http) 不能强加 tls:true
             wraw("tls", "true")
             if n.get("sni"):
                 w("servername", n["sni"])
@@ -569,6 +569,12 @@ def _clash_proxy_block(n: dict) -> str | None:
                 w("client-fingerprint", n["fp"])
             if n.get("alpn"):
                 w("alpn", n["alpn"])
+    elif typ in ("trojan", "hysteria2", "tuic"):
+        # 这些协议默认走 TLS，但 sni 不写会被 mihomo 拿服务器地址当 SNI → 证书对不上握手失败
+        if n.get("sni"):
+            w("sni", n["sni"])
+        if n.get("fp"):
+            w("client-fingerprint", n["fp"])
     if n.get("skip_cert_verify"):
         wraw("skip-cert-verify", "true")
     if typ in ("vless", "trojan"):

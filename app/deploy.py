@@ -492,15 +492,14 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         j["status"] = "done"
         j["result"] = {"links": links, "container_ip": cip, "public_ip": pub}
 
-        # 持久化
-        db.ex("""INSERT INTO apps(container_id,node_id,name,app_type,params,links,dnat_rules,status,log,created_at)
+        # 持久化（ex 返回 lastrowid，避免并发部署时 ORDER BY id DESC 拿错行）
+        app_id = db.ex("""INSERT INTO apps(container_id,node_id,name,app_type,params,links,dnat_rules,status,log,created_at)
                  VALUES(?,?,?,?,?,?,?,?,?,?)""",
               (container or {}).get("id"), node["id"], name_prefix, "proxy",
               json.dumps({"spec": [{k: v for k, v in n.items()} for n in spec],
                           "public_ip": pub, "container_ip": cip}, ensure_ascii=False),
               json.dumps(links, ensure_ascii=False),
               json.dumps(dnat_rules), "done", "".join(j["log"]), db.now())
-        app_id = db.one("SELECT id FROM apps ORDER BY id DESC LIMIT 1")["id"]
         j["app_id"] = app_id
 
     except Exception as e:
@@ -510,7 +509,7 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         try:
             db.ex("""INSERT INTO apps(container_id,name,app_type,status,log,created_at)
                      VALUES(?,?,?,?,?,?)""",
-                  container["id"], name_prefix, "proxy", "failed",
+                  (container or {}).get("id"), name_prefix, "proxy", "failed",
                   "".join(j["log"])[-4000:], db.now())
         except Exception:
             pass

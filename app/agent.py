@@ -8,6 +8,10 @@ import secrets
 import subprocess
 import time
 
+# Agent 脚本版本指纹：AGENT_PY 内嵌同名标记 + UPGRADE_SH 校验用，两处必须一致。
+# 升级校验依赖它判断下载到的新版 agent.py 确实比已装版本新（防拿到错误页/旧缓存）。
+AGENT_VER = "v20260829"
+
 # ────────────────────────── 面板侧状态 ──────────────────────────
 _pending: dict[int, list] = {}       # node_id -> [cmd,...]
 _results: dict[str, dict] = {}       # cmd_id -> {"rc":..,"out":..} / event style
@@ -118,7 +122,15 @@ def pop_pending(node_id: int) -> list:
 
 
 def push_result(cmd_id: str, rc: int, out: str):
-    _results[cmd_id] = {"rc": rc, "out": out}
+    # 自动安装 LXC / 升级等命令的结果没有 wait 方消费，按时间淘汰防止无限增长
+    now = time.time()
+    if len(_results) > 256:
+        for k in [k for k, v in _results.items() if now - v.get("ts", 0) > 600]:
+            _results.pop(k, None)
+        if len(_results) >= 256:   # 突发洪峰：仍超限则按时间丢最老的
+            for k in sorted(_results, key=lambda k: _results[k].get("ts", 0))[:len(_results) - 255]:
+                _results.pop(k, None)
+    _results[cmd_id] = {"rc": rc, "out": out, "ts": now}
 
 
 def touch(node_id: int):
@@ -141,6 +153,7 @@ import base64, json, os, platform, socket, subprocess, sys, threading, time
 import urllib.request
 
 API, TOKEN = "", ""
+AGENT_VER = "v20260829"   # 版本指纹：面板 UPGRADE_SH 校验用，改代码时同步更新
 CONF = "/opt/lxcdeck-agent/agent.conf"
 PREV = {"cpu_line": None, "rx": None, "tx": None, "ct_cpu": {}}
 _last_full = 0.0
@@ -470,7 +483,7 @@ def main():
             break
         except Exception:
             continue
-    log(f"started v20260828 (conf={saved}), panel={API}")
+    log(f"started {AGENT_VER} (conf={saved}), panel={API}")
     fail = 0
     _last_rep: dict = {}
     while True:
@@ -676,7 +689,7 @@ else
 fi
 [ -s .new ] || { echo "[ERR] 下载内容为空"; exit 1; }
 head -1 .new | grep -q python || { echo "[ERR] 内容校验失败(非脚本)"; rm -f .new; exit 1; }
-grep -q "started v20260827" .new || { echo "[ERR] 新版指纹缺失(面板代码未更新?)"; rm -f .new; exit 1; }
+grep -q "started __AGENT_VER__" .new || { echo "[ERR] 新版指纹缺失(面板代码未更新?)"; rm -f .new; exit 1; }
 mv -f .new agent.py
 date "+%Y-%m-%d %H:%M:%S" > version.txt
 
@@ -696,7 +709,7 @@ restart_svc() {
 }
 if restart_svc; then
   echo "==> [4/4] 完成"
-  echo "[OK] Agent 已升级 ($(cat version.txt)) v20260827"
+  echo "[OK] Agent 已升级 ($(cat version.txt)) __AGENT_VER__"
 else
   echo "[WARN] 新版启动失败，自动回滚旧版本"
   mv -f agent.py.bak agent.py
@@ -707,3 +720,6 @@ else
   fi
 fi
 '''
+
+# 版本指纹注入：UPGRADE_SH 里的 __AGENT_VER__ 占位符替换为当前 agent 版本
+UPGRADE_SH = UPGRADE_SH.replace("__AGENT_VER__", AGENT_VER)

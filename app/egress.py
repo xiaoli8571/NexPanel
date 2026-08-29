@@ -85,14 +85,14 @@ def warp_reg_for(app_id: int) -> dict:
         except Exception:
             pass
     reg = _warp_register()
-    db.q("INSERT INTO settings(key,value) VALUES(?,?) "
-         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-         (key, json.dumps(reg)))
+    db.ex("INSERT INTO settings(key,value) VALUES(?,?) "
+          "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          (key, json.dumps(reg)))
     return reg
 
 
 def warp_drop(app_id: int):
-    db.q("DELETE FROM settings WHERE key=?", (f"warp_reg:{app_id}",))
+    db.ex("DELETE FROM settings WHERE key=?", (f"warp_reg:{app_id}",))
 
 
 # ────────────── sing-box 配置注入（1.12.x schema） ──────────────

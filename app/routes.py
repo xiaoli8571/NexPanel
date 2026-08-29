@@ -770,6 +770,7 @@ async def agent_poll(request: _Req):
 
 @router.post("/agent/result")
 async def agent_result(request: _Req):
+    nid = _agent_auth(request)
     payload = await request.json()
     agent_mod.push_result(payload["id"], int(payload.get("rc", 0)),
                           base64_decode(payload.get("out", "")))
@@ -893,7 +894,7 @@ def _set_egress_state(app_id: int, status: str, error: str = "", step: str = "")
         error = st.get("error", error)   # 进度更新时保留首个错误
     params["egress_state"] = {"status": status, "error": error[:500], "step": step,
                               "ts": int(time.time())}
-    db.q("UPDATE apps SET params=? WHERE id=?", (json.dumps(params), app_id))
+    db.ex("UPDATE apps SET params=? WHERE id=?", (json.dumps(params), app_id))
 
 
 async def _apply_egress_task(app_id: int, container_id, node_id):
@@ -1020,7 +1021,7 @@ async def set_egress(app_id: int, body: EgressIn, request: Request,
         egress_mod.warp_drop(app_id)   # 不再用 WARP，清理注册凭据
     params["egress"] = eg
     params["egress_state"] = {"status": "pending", "error": "", "ts": int(time.time())}
-    db.q("UPDATE apps SET params=? WHERE id=?", (json.dumps(params), app_id))
+    db.ex("UPDATE apps SET params=? WHERE id=?", (json.dumps(params), app_id))
     container_id = a["container_id"]
     node_id = a["node_id"]
     if container_id:
