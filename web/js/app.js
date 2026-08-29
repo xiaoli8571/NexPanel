@@ -1338,7 +1338,7 @@ window.openEgressModal = async function(appId){
           <input type="radio" name="eg-mode" value="${v}" ${eg.mode===v?"checked":""} style="margin-right:4px">${l}</label>`).join("")}
     </div>
     <div id="eg-resi-box" style="display:none;margin-top:10px;padding:10px;border:1px dashed var(--line);border-radius:10px">
-      <label style="font-size:12px;color:var(--muted);display:block">🆓 免费住宅 IP（VPN Gate 志愿者家庭宽带，选国家即可）</label>
+      <label style="font-size:12px;color:var(--muted);display:block">🆓 免费住宅 IP（VPN Gate 志愿者家庭宽带——下拉实时显示各国在线节点数，选了没人值守的国家会自动重试）</label>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
         <select class="input" id="eg-resi-country" style="flex:1;min-width:170px">
           ${[["JP","日本 🇯🇵"],["US","美国 🇺🇸"],["SG","新加坡 🇸🇬"],["HK","香港 🇭🇰"],["TW","台湾 🇹🇼"],["KR","韩国 🇰🇷"],["DE","德国 🇩🇪"],["FR","法国 🇫🇷"],["NL","荷兰 🇳🇱"],["GB","英国 🇬🇧"],["CA","加拿大 🇨🇦"],["AU","澳大利亚 🇦🇺"],["IT","意大利 🇮🇹"],["ES","西班牙 🇪🇸"],["SE","瑞典 🇸🇪"],["CH","瑞士 🇨🇭"],["RU","俄罗斯 🇷🇺"],["IN","印度 🇮🇳"],["BR","巴西 🇧🇷"],["MX","墨西哥 🇲🇽"],["TR","土耳其 🇹🇷"],["PL","波兰 🇵🇱"],["CZ","捷克 🇨🇿"],["UA","乌克兰 🇺🇦"]]
@@ -1383,6 +1383,19 @@ window.openEgressModal = async function(appId){
   const syncResi = ()=>{ box.style.display = ov.querySelector("input[name=eg-mode]:checked").value==="residential" ? "" : "none"; };
   ov.querySelectorAll("input[name=eg-mode]").forEach(r=>r.onchange=syncResi);
   syncResi();
+  // 实时可用国家增强：拉 VPN Gate 聚合，显示「N 节点在线 · 延迟」，无货国家不出现
+  const hint = ov.querySelector("#eg-resi-status");
+  api("/residential/countries").then(r=>{
+    const sel = ov.querySelector("#eg-resi-country"); if(!sel) return;
+    const list = r.countries || [];
+    if(!list.length){ if(hint) hint.insertAdjacentHTML("afterend", `<p style="color:var(--muted);font-size:11px;margin-top:4px">⚠️ 实时列表获取失败（VPN Gate 可能被本地网络屏蔽），已用内置国家列表——agent 在节点宿主拉取，不受影响</p>`); return; }
+    const cur = sel.value;
+    const fb = {}; (r.fallback||[]).forEach(x=>fb[x.code]=x.name);
+    sel.innerHTML = list.map(c=>`<option value="${c.code}">${esc(fb[c.code]||c.name||c.code)}${c.count?` · ${c.count} 节点在线`:""}${c.ping?` · 延迟${c.ping}ms`:""}</option>`).join("");
+    if(cur && !list.some(c=>c.code===cur))
+      sel.insertAdjacentHTML("beforeend", `<option value="${cur}">${esc(fb[cur]||cur)}（当前无在线节点，不推荐）</option>`);
+    sel.value = cur;
+  }).catch(()=>{});
   const save = async (modeOverride)=>{
     const mode = modeOverride || ov.querySelector("input[name=eg-mode]:checked").value;
     const body = {mode};

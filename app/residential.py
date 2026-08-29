@@ -21,6 +21,8 @@ COUNTRY_LIST = [
     ("TR", "土耳其"), ("PL", "波兰"), ("CZ", "捷克"), ("UA", "乌克兰"),
 ]
 
+API_URL = "https://www.vpngate.net/api/iphone/"   # 与节点 agent 内嵌一致
+
 # ───────── 节点宿主守护 agent（单文件，无第三方依赖） ─────────
 RESI_AGENT = r'''#!/usr/bin/env python3
 """NexPanel Residential Egress Agent — VPN Gate free residential IP (X-UI compatible)"""
@@ -335,6 +337,56 @@ echo UNINSTALL_DONE
 '''
 
 _status_cache = {}  # node_id -> (ts, status dict)
+
+
+# ───────── 面板侧：VPN Gate 实时可用国家聚合（前端下拉数据源） ─────────
+
+_vpngate_cache = {"ts": 0.0, "rows": []}
+
+
+def vpngate_countries() -> list:
+    """拉 vpngate.net CSV 按国家聚合：仅统计带 OpenVPN 配置的可用节点。
+    返回 [{code, name, count, ping, sessions}]，count 降序。10 分钟缓存。
+    失败抛异常（调用方决定是否回退静态列表）。"""
+    import csv as _csv
+    import io as _io
+    import urllib.request
+    if _vpngate_cache["rows"] and time.time() - _vpngate_cache["ts"] < 600:
+        return _vpngate_cache["rows"]
+    req = urllib.request.Request(API_URL, headers={"User-Agent": "Mozilla/5.0"})
+    raw = urllib.request.urlopen(req, timeout=30).read().decode()
+    lines = raw.splitlines()
+    hdr_i = next(i for i, l in enumerate(lines) if l.startswith("#HostName"))
+    keep = [lines[hdr_i].lstrip("#")] + [l for l in lines if l and not l.startswith("#")]
+    names = {c: n for c, n in COUNTRY_LIST}
+    agg = {}
+    for r in _csv.DictReader(_io.StringIO("\n".join(keep))):
+        cs = (r.get("CountryShort") or "").upper()
+        if not cs or not r.get("OpenVPN_ConfigData_Base64"):
+            continue
+        try:
+            ping = int(r.get("Ping") or 0)
+        except ValueError:
+            ping = 0
+        try:
+            sessions = int(r.get("NumVpnSessions") or 0)
+        except ValueError:
+            sessions = 0
+        a = agg.setdefault(cs, {"code": cs, "count": 0, "ping": 0, "sessions": 0,
+                                "long": (r.get("CountryLong") or "").strip()})
+        a["count"] += 1
+        a["sessions"] += sessions
+        if ping and (not a["ping"] or ping < a["ping"]):
+            a["ping"] = ping
+    rows = []
+    for a in agg.values():
+        a["name"] = names.get(a["code"]) or a.pop("long") or a["code"]
+        rows.append(a)
+    rows.sort(key=lambda x: -x["count"])
+    if rows:
+        _vpngate_cache["rows"] = rows
+        _vpngate_cache["ts"] = time.time()
+    return rows
 
 
 async def _run(node, script, timeout=600):

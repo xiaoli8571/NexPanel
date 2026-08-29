@@ -1037,6 +1037,19 @@ async def set_egress(app_id: int, body: EgressIn, request: Request,
             "warp_reg_cached": old_mode.startswith("warp_") and eg["mode"].startswith("warp_")}
 
 
+@router.get("/residential/countries")
+def residential_countries(user: dict = Depends(current_user)):
+    """VPN Gate 实时可用国家（节点数/延迟聚合）+ 静态兜底列表"""
+    from . import residential as resi_mod
+    rows = []
+    try:
+        rows = resi_mod.vpngate_countries()
+    except Exception:
+        rows = []
+    return {"countries": rows,
+            "fallback": [{"code": c, "name": n} for c, n in resi_mod.COUNTRY_LIST]}
+
+
 @router.get("/nodes/{nid}/residential")
 async def node_residential(nid: int, user: dict = Depends(current_user)):
     """节点宿主住宅出口服务状态（VPN Gate agent）"""
