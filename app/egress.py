@@ -117,7 +117,7 @@ def _warp_endpoint(reg: dict, mode: str) -> dict:
 
 def _resi_outbound(egress: dict) -> dict:
     proto = egress.get("resi_proto") or "socks5"
-    ob = {"type": "socks5" if proto == "socks5" else "http",
+    ob = {"type": "socks" if proto == "socks5" else "http",
           "tag": "resi-out",
           "server": egress.get("resi_addr", ""),
           "server_port": int(egress.get("resi_port") or 0)}
@@ -136,11 +136,13 @@ def _selective_domains(egress: dict) -> list[str]:
             if d.strip()]
 
 
-def apply_egress(conf: dict, egress: dict | None, app_id: int) -> tuple[dict, str]:
+def apply_egress(conf: dict, egress: dict | None, app_id: int,
+                 resi_gw: str | None = None) -> tuple[dict, str]:
     """把 egress 配置注入 sing-box conf（原地修改并返回），返回 (conf, 说明)
 
     - global:  route.final = 出站（全部流量走出口）
     - selective: 仅 domain_suffix 命中的目标走出口，其余保持默认直连
+    - resi_gw: 住宅出口网关（宿主网桥 IP；宿主直装传 None → 127.0.0.1）
     """
     mode = (egress or {}).get("mode", "native")
     if mode == "native" or not egress:
@@ -154,11 +156,18 @@ def apply_egress(conf: dict, egress: dict | None, app_id: int) -> tuple[dict, st
         conf.setdefault("endpoints", []).append(endpoint)
         tag, note = "warp-out", f"{MODE_LABELS[mode]}（WARP 端点 {WARP_HOST}:{WARP_PORT}）"
     elif mode == "residential":
-        if not egress.get("resi_addr") or not egress.get("resi_port"):
-            raise ValueError("住宅代理需要填写地址和端口")
-        ob = _resi_outbound(egress)
-        conf.setdefault("outbounds", []).append(ob)
-        tag, note = "resi-out", (f"住宅代理（{ob['type']}://{ob['server']}:{ob['server_port']}）")
+        if egress.get("country"):                     # 新格式：VPN Gate 节点级住宅出口
+            cc = egress["country"].upper()
+            gw = resi_gw or "127.0.0.1"
+            ob = {"type": "socks", "tag": "resi-out", "server": gw, "server_port": 7920}
+            conf.setdefault("outbounds", []).append(ob)
+            tag, note = "resi-out", f"住宅出口·{cc}（VPN Gate 经宿主 {gw}:7920）"
+        else:                                          # 旧格式：自定义上游代理
+            if not egress.get("resi_addr") or not egress.get("resi_port"):
+                raise ValueError("住宅代理需要填写地址和端口")
+            ob = _resi_outbound(egress)
+            conf.setdefault("outbounds", []).append(ob)
+            tag, note = "resi-out", (f"住宅代理（{ob['type']}://{ob['server']}:{ob['server_port']}）")
     else:
         raise ValueError(f"未知出口模式: {mode}")
 
@@ -185,24 +194,31 @@ def normalize(payload: dict) -> dict:
         raise ValueError(f"无效出口模式: {mode}")
     e: dict = {"mode": mode}
     if mode == "residential":
-        proto = payload.get("resi_proto") or "socks5"
-        if proto not in ("socks5", "http"):
-            raise ValueError("住宅代理协议仅支持 socks5 / http")
-        addr = (payload.get("resi_addr") or "").strip()
-        port = int(payload.get("resi_port") or 0)
-        if not addr or not (1 <= port <= 65535):
-            raise ValueError("住宅代理地址/端口无效")
         resi_mode = payload.get("resi_mode") or "global"
         if resi_mode not in ("global", "selective"):
             raise ValueError("分流模式无效")
-        e.update({
-            "resi_proto": proto, "resi_addr": addr[:128],
-            "resi_port": port,
-            "resi_user": (payload.get("resi_user") or "")[:64],
-            "resi_pass": (payload.get("resi_pass") or "")[:128],
-            "resi_mode": resi_mode,
-            "resi_domains": (payload.get("resi_domains") or "")[:2048],
-        })
+        country = (payload.get("country") or "").strip().upper()
+        if country:                                  # 新格式：VPN Gate 选国家
+            if not re.fullmatch(r"[A-Z]{2}", country):
+                raise ValueError("国家代码无效（两位字母，如 JP / US / SG）")
+            e.update({"country": country, "resi_mode": resi_mode,
+                      "resi_domains": (payload.get("resi_domains") or "")[:2048]})
+        else:                                        # 旧格式：自定义上游
+            proto = payload.get("resi_proto") or "socks5"
+            if proto not in ("socks5", "http"):
+                raise ValueError("住宅代理协议仅支持 socks5 / http")
+            addr = (payload.get("resi_addr") or "").strip()
+            port = int(payload.get("resi_port") or 0)
+            if not addr or not (1 <= port <= 65535):
+                raise ValueError("住宅代理地址/端口无效（或填写国家代码）")
+            e.update({
+                "resi_proto": proto, "resi_addr": addr[:128],
+                "resi_port": port,
+                "resi_user": (payload.get("resi_user") or "")[:64],
+                "resi_pass": (payload.get("resi_pass") or "")[:128],
+                "resi_mode": resi_mode,
+                "resi_domains": (payload.get("resi_domains") or "")[:2048],
+            })
         if resi_mode == "selective" and not _selective_domains(e):
             raise ValueError("分流模式需要填写至少一个域名后缀（如 openai.com）")
     return e

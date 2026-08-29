@@ -1300,12 +1300,24 @@ async function loadApps(){
 
 /* ── 应用出口（WARP / 住宅代理） ── */
 function egressBtnLabel(a){
-  const m = (a.egress||{}).mode || "native";
+  const e = a.egress||{};
+  const m = e.mode || "native";
   const st = (a.egress_state||{}).status || "";
   const flag = st==="pending" ? " ⏳" : st==="error" ? " ⚠️" : (m!=="native" ? " ✓" : "");
   const name = m==="warp_ipv4" ? "WARP·v4" : m==="warp_ipv6" ? "WARP·v6" :
-               m==="warp_dual" ? "WARP·双栈" : m==="residential" ? "住宅" : "出口";
+               m==="warp_dual" ? "WARP·双栈" : m==="residential" ? ("住宅"+(e.country?"·"+e.country:"")) : "出口";
   return `🌍 ${name}${flag}`;
+}
+
+function resiStatusLine(nr, country){
+  if(!nr) return "节点住宅服务：未查询";
+  if(nr.service==="unknown") return "节点住宅服务：⚠️ 无法连接节点";
+  if(nr.service!=="active") return "节点住宅服务：未部署（保存后自动部署）";
+  if(nr.state==="ready"){
+    const h = nr.hosting ? "（⚠️ 机房 IP）" : "（✓ 住宅 ISP）";
+    return `节点住宅服务：✅ 就绪 · ${nr.country||"?"} · 出口 ${nr.egress_ip||"?"} ${h} · ${nr.isp||""} · 链路 ${nr.node||"?"}（切换国家保存后自动重拨）`;
+  }
+  return `节点住宅服务：⏳ ${nr.state||"pending"} · ${nr.msg||""}（ country 文件=${nr.country||"?"} ）`;
 }
 
 window.openEgressModal = async function(appId){
@@ -1314,7 +1326,7 @@ window.openEgressModal = async function(appId){
   const eg = cur.egress || {mode:"native"};
   const state = cur.egress_state || {};
   const stLine = state.ts ? (state.status==="applied" ? `✅ 已应用（${new Date(state.ts*1000).toLocaleString()}）`
-                        : state.status==="pending" ? "⏳ 应用中…" : `⚠️ 失败：${esc(state.error||"")}`) : "未配置过";
+                        : state.status==="pending" ? `⏳ 应用中…${state.step?`<br><span style="font-size:11px">${esc(state.step)}</span>`:""}` : `⚠️ 失败：${esc(state.error||"")}`) : "未配置过";
   const ov = openModal(`🌍 出口配置 — ${esc(cur.name||("应用 #"+appId))}`, `
     <p style="color:var(--muted);font-size:12.5px;line-height:1.7">
       出站流量模式：该应用（及其所在机器的全部应用）的出站可走 <b>Cloudflare WARP</b>（获得 WARP IPv4/IPv6 出口，无需系统级安装）或 <b>住宅代理</b>（SOCKS5/HTTP，ISP 住宅 IP）。
@@ -1326,26 +1338,36 @@ window.openEgressModal = async function(appId){
           <input type="radio" name="eg-mode" value="${v}" ${eg.mode===v?"checked":""} style="margin-right:4px">${l}</label>`).join("")}
     </div>
     <div id="eg-resi-box" style="display:none;margin-top:10px;padding:10px;border:1px dashed var(--line);border-radius:10px">
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <label style="font-size:12px;color:var(--muted);display:block">🆓 免费住宅 IP（VPN Gate 志愿者家庭宽带，选国家即可）</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <select class="input" id="eg-resi-country" style="flex:1;min-width:170px">
+          ${[["JP","日本 🇯🇵"],["US","美国 🇺🇸"],["SG","新加坡 🇸🇬"],["HK","香港 🇭🇰"],["TW","台湾 🇹🇼"],["KR","韩国 🇰🇷"],["DE","德国 🇩🇪"],["FR","法国 🇫🇷"],["NL","荷兰 🇳🇱"],["GB","英国 🇬🇧"],["CA","加拿大 🇨🇦"],["AU","澳大利亚 🇦🇺"],["IT","意大利 🇮🇹"],["ES","西班牙 🇪🇸"],["SE","瑞典 🇸🇪"],["CH","瑞士 🇨🇭"],["RU","俄罗斯 🇷🇺"],["IN","印度 🇮🇳"],["BR","巴西 🇧🇷"],["MX","墨西哥 🇲🇽"],["TR","土耳其 🇹🇷"],["PL","波兰 🇵🇱"],["CZ","捷克 🇨🇿"],["UA","乌克兰 🇺🇦"]]
+            .map(([v,l])=>`<option value="${v}" ${(eg.country||"")==v?"selected":""}>${l}</option>`).join("")}
+        </select>
+      </div>
+      <p id="eg-resi-status" style="color:var(--muted);font-size:11px;margin-top:6px;line-height:1.6">${resiStatusLine(cur.node_residential, eg.country)}</p>
+      <div style="border-top:1px dashed var(--line);margin:9px 0"></div>
+      <label style="font-size:12px;color:var(--muted);display:block">或：自定义上游代理（商业住宅代理商的 SOCKS5/HTTP 入口，填了则优先于选国家）</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
         <select class="input" id="eg-resi-proto" style="width:110px">
           <option value="socks5" ${eg.resi_proto==="http"?"":"selected"}>SOCKS5</option>
           <option value="http" ${eg.resi_proto==="http"?"selected":""}>HTTP</option>
         </select>
-        <input class="input" id="eg-resi-addr" placeholder="地址 如 proxy.isp.com" style="flex:1;min-width:150px" value="${esc(eg.resi_addr||"")}">
+        <input class="input" id="eg-resi-addr" placeholder="地址 如 proxy.isp.com（选国家则留空）" style="flex:1;min-width:150px" value="${esc(eg.resi_addr||"")}">
         <input class="input" id="eg-resi-port" type="number" min="1" max="65535" placeholder="端口" style="width:90px" value="${eg.resi_port||""}">
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
         <input class="input" id="eg-resi-user" placeholder="用户名（可选）" style="flex:1;min-width:130px" value="${esc(eg.resi_user||"")}">
         <input class="input" id="eg-resi-pass" type="password" placeholder="密码（可选）" style="flex:1;min-width:130px" value="${esc(eg.resi_pass||"")}">
       </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:9px">
         <select class="input" id="eg-resi-mode" style="width:130px">
           <option value="global" ${(eg.resi_mode||"global")==="global"?"selected":""}>全局接管</option>
           <option value="selective" ${eg.resi_mode==="selective"?"selected":""}>按域名分流</option>
         </select>
         <input class="input" id="eg-resi-domains" placeholder="分流域名后缀，逗号分隔：openai.com,netflix.com" style="flex:1;min-width:170px" value="${esc(eg.resi_domains||"")}">
       </div>
-      <p style="color:var(--muted);font-size:11px;margin-top:6px;line-height:1.6">全局接管=该应用全部流量走住宅 IP；按域名分流=仅命中后缀的域名走住宅，其余直连。填住宅代理商的 SOCKS5/HTTP 入口即可。</p>
+      <p style="color:var(--muted);font-size:11px;margin-top:6px;line-height:1.6">选国家=在节点宿主部署 VPN Gate 免费住宅隧道（首次约 1-3 分钟，自动优选重拨，节点级生效——同节点所有应用共用）；自定义上游=应用所在机器直接连代理商入口。全局接管=全部流量走住宅 IP；按域名分流=仅命中后缀的域名走住宅。</p>
     </div>
     <p style="color:var(--muted);font-size:11.5px;margin-top:10px;line-height:1.7">
       · WARP 每应用独立注册 Cloudflare 设备（首次保存时自动完成）<br>
@@ -1365,11 +1387,14 @@ window.openEgressModal = async function(appId){
     const mode = modeOverride || ov.querySelector("input[name=eg-mode]:checked").value;
     const body = {mode};
     if(mode==="residential"){
-      body.resi_proto = ov.querySelector("#eg-resi-proto").value;
+      body.country = ov.querySelector("#eg-resi-country").value;
       body.resi_addr = ov.querySelector("#eg-resi-addr").value.trim();
-      body.resi_port = +ov.querySelector("#eg-resi-port").value || 0;
-      body.resi_user = ov.querySelector("#eg-resi-user").value.trim();
-      body.resi_pass = ov.querySelector("#eg-resi-pass").value;
+      if(body.resi_addr){   // 自定义上游优先
+        body.resi_proto = ov.querySelector("#eg-resi-proto").value;
+        body.resi_port = +ov.querySelector("#eg-resi-port").value || 0;
+        body.resi_user = ov.querySelector("#eg-resi-user").value.trim();
+        body.resi_pass = ov.querySelector("#eg-resi-pass").value;
+      }
       body.resi_mode = ov.querySelector("#eg-resi-mode").value;
       body.resi_domains = ov.querySelector("#eg-resi-domains").value.trim();
     }

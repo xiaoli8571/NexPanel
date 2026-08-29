@@ -97,9 +97,12 @@ def collect_specs() -> list[dict]:
         if not spec:
             continue
         pub_ip = params.get("public_ip") or ""
-        eg = (params.get("egress") or {}).get("mode", "native")
+        egd = params.get("egress") or {}
+        eg = egd.get("mode", "native")
         eg_tag = {"warp_ipv4": "WARP·v4", "warp_ipv6": "WARP·v6",
-                  "warp_dual": "WARP·双栈", "residential": "住宅"}.get(eg, "")
+                  "warp_dual": "WARP·双栈"}.get(eg, "")
+        if eg == "residential":
+            eg_tag = ("住宅·" + (egd.get("country") or "").upper()) if egd.get("country") else "住宅"
         for n in spec:
             n = dict(n)
             n["_app"] = r["name"]

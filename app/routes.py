@@ -882,13 +882,16 @@ def _app_row(app_id: int) -> dict:
     return a
 
 
-def _set_egress_state(app_id: int, status: str, error: str = ""):
+def _set_egress_state(app_id: int, status: str, error: str = "", step: str = ""):
     a = _app_row(app_id)
     try:
         params = json.loads(a["params"] or "{}")
     except Exception:
         params = {}
-    params["egress_state"] = {"status": status, "error": error[:500],
+    st = params.get("egress_state") or {}
+    if status == "pending" and st.get("status") == "pending":
+        error = st.get("error", error)   # 进度更新时保留首个错误
+    params["egress_state"] = {"status": status, "error": error[:500], "step": step,
                               "ts": int(time.time())}
     db.q("UPDATE apps SET params=? WHERE id=?", (json.dumps(params), app_id))
 
@@ -913,8 +916,46 @@ async def _apply_egress_task(app_id: int, container_id, node_id):
         _set_egress_state(app_id, "error", str(e))
 
 
+async def _apply_residential_task(app_id: int, container_id, node_id: int,
+                                  country: str, log_j: dict):
+    """住宅出口（VPN Gate 选国家）：节点宿主部署 agent → 切国家 → 等隧道就绪 → 下发 sing-box"""
+    from . import deploy as deploy_mod, residential as resi_mod
+    try:
+        node = db.one("SELECT * FROM nodes WHERE id=?", (node_id,))
+        if not node or node["kind"] not in ("agent", "ssh"):
+            raise RuntimeError("节点不存在或未接入")
+        node = dict(node)
+        _set_egress_state(app_id, "pending", "", step="检查节点住宅服务")
+        st = await resi_mod.get_status(node)
+        if st.get("service") != "active":
+            _set_egress_state(app_id, "pending", "",
+                              step="首次部署节点住宅服务（安装 openvpn，约 1-3 分钟）")
+            await resi_mod.deploy_residential(node)
+        _set_egress_state(app_id, "pending", "", step=f"切换出口国家 → {country}（拨号约 1-2 分钟）")
+        await resi_mod.set_country(node, country)
+        ready = None
+        for _ in range(24):                     # 最长约 2 分钟
+            await asyncio.sleep(5)
+            st = await resi_mod.get_status(node)
+            ready = st
+            _set_egress_state(app_id, "pending", "",
+                              step=f"等待住宅隧道就绪（{st.get('state', '?')}）{st.get('msg', '')}")
+            if st.get("state") == "ready" and (st.get("country") or "").upper() == country:
+                break
+        else:
+            raise RuntimeError(f"住宅隧道未就绪: {ready.get('msg') if ready else '超时'}")
+        _set_egress_state(app_id, "pending", "",
+                          step=f"隧道就绪 {ready.get('egress_ip', '')} · 下发应用配置")
+        ok = await deploy_mod._sync_machine_singbox(
+            container_id, node_id, node, None, log_j)
+        _set_egress_state(app_id, "applied", "" if ok else "机器上无活动应用，sing-box 已停止")
+    except Exception as e:
+        _set_egress_state(app_id, "error", str(e))
+
+
 class EgressIn(BaseModel):
     mode: str = "native"
+    country: str = ""            # residential 新格式：VPN Gate 国家代码（JP/US/…）
     resi_proto: str = "socks5"
     resi_addr: str = ""
     resi_port: int = 0
@@ -925,7 +966,7 @@ class EgressIn(BaseModel):
 
 
 @router.get("/apps/{app_id}/egress")
-def get_egress(app_id: int, user: dict = Depends(current_user)):
+async def get_egress(app_id: int, user: dict = Depends(current_user)):
     a = _app_row(app_id)
     try:
         params = json.loads(a["params"] or "{}")
@@ -937,8 +978,20 @@ def get_egress(app_id: int, user: dict = Depends(current_user)):
         eg["resi_pass"] = "******"
     if eg.get("resi_user"):
         eg["resi_user_set"] = True
+    node_residential = None
+    if eg.get("mode") == "residential" and eg.get("country"):
+        node_id = a["node_id"]
+        if a["container_id"]:
+            c = db.one("SELECT node_id FROM containers WHERE id=?", (a["container_id"],))
+            node_id = c["node_id"] if c else node_id
+        if node_id:
+            node = db.one("SELECT * FROM nodes WHERE id=?", (node_id,))
+            if node:
+                from . import residential as resi_mod
+                node_residential = await resi_mod.get_status(dict(node))
     return {"app_id": app_id, "name": a["name"], "egress": eg,
-            "egress_state": params.get("egress_state") or {}}
+            "egress_state": params.get("egress_state") or {},
+            "node_residential": node_residential}
 
 
 @router.post("/apps/{app_id}/egress")
@@ -970,12 +1023,43 @@ async def set_egress(app_id: int, body: EgressIn, request: Request,
     if container_id:
         c = db.one("SELECT node_id FROM containers WHERE id=?", (container_id,))
         node_id = c["node_id"] if c else node_id
-    asyncio.create_task(_apply_egress_task(app_id, container_id, node_id))
+    log_j = {"id": f"egress-{app_id}", "log": [], "status": "", "result": None}
+    if eg["mode"] == "residential" and eg.get("country"):
+        asyncio.create_task(_apply_residential_task(
+            app_id, container_id, node_id, eg["country"], log_j))
+    else:
+        asyncio.create_task(_apply_egress_task(app_id, container_id, node_id))
     db.audit(admin["sub"], "配置应用出口",
-             f"{a['name']} → {egress_mod.MODE_LABELS.get(eg['mode'], eg['mode'])}",
+             f"{a['name']} → {egress_mod.MODE_LABELS.get(eg['mode'], eg['mode'])}"
+             + (f"·{eg['country']}" if eg.get("country") else ""),
              "", request.client.host)
     return {"ok": True, "mode": eg["mode"], "state": "pending",
             "warp_reg_cached": old_mode.startswith("warp_") and eg["mode"].startswith("warp_")}
+
+
+@router.get("/nodes/{nid}/residential")
+async def node_residential(nid: int, user: dict = Depends(current_user)):
+    """节点宿主住宅出口服务状态（VPN Gate agent）"""
+    node = db.one("SELECT * FROM nodes WHERE id=?", (nid,))
+    if not node:
+        raise HTTPException(404, "节点不存在")
+    from . import residential as resi_mod
+    return {"node_id": nid, **(await resi_mod.get_status(dict(node)))}
+
+
+@router.delete("/nodes/{nid}/residential")
+async def node_residential_uninstall(nid: int, request: Request,
+                                     admin: dict = Depends(require_admin)):
+    """卸载节点宿主住宅出口服务（openvpn/agent/tun 一并清理）"""
+    node = db.one("SELECT * FROM nodes WHERE id=?", (nid,))
+    if not node:
+        raise HTTPException(404, "节点不存在")
+    if node["kind"] not in ("agent", "ssh"):
+        raise HTTPException(400, "该节点类型不支持住宅出口")
+    from . import residential as resi_mod
+    await resi_mod.uninstall(dict(node))
+    db.audit(admin["sub"], "卸载节点住宅出口服务", node["name"], "", request.client.host)
+    return {"ok": True, "node_id": nid, "service": "uninstalled"}
 
 
 @router.get("/apps")

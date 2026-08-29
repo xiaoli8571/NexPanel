@@ -606,7 +606,14 @@ async def _sync_machine_singbox(container_id: int | None, node_id: int,
     eg, eg_app_id = egress_mod.machine_egress(container_id, node_id)
     eg_note = "原生出口"
     if eg:
-        conf, eg_note = egress_mod.apply_egress(conf, eg, eg_app_id)
+        if eg.get("mode") == "residential" and eg.get("country") and container_id is not None:
+            # 容器内应用 → 走宿主网关的 socks5:7920（宿主直装则 127.0.0.1）
+            from . import residential as resi_mod
+            st = await resi_mod.cached_host_status(node_id, dict(node))
+            gw = (st or {}).get("bridge_ip") or "10.0.3.1"
+            eg = dict(eg); eg["resi_gw"] = gw
+        conf, eg_note = egress_mod.apply_egress(conf, eg, eg_app_id,
+                                                resi_gw=(eg or {}).get("resi_gw"))
     try:
         _log(j, f"[EGRESS] {eg_note}")
     except Exception:
