@@ -1093,7 +1093,7 @@ async function viewApps(){
 
   const DESC = {
     "xui-8in1":"将向目标一次性下发 8 个防封协议（起始端口连续占用 8 个），自动生成 Reality 密钥对、自签证书；容器模式还会在宿主节点配置 DNAT 端口映射。",
-    "vless-ws-cf":"🎯 专治 IP被墙 / NAT小鸡 / 只出不进机器：本机 sing-box 只监听 127.0.0.1 的 VLESS+WS，并安装 cloudflared 建立快速隧道，走 Cloudflare CDN 443 接入，无需任何公网入站端口。「起始端口」为本地 ws 端口。注意：快速隧道域名在机器重启后会变化，届时点一次「同步配置」即可自动更新链接与订阅。"};
+    "vless-ws-cf":"🎯 专治 IP被墙 / NAT小鸡 / 只出不进机器：本机 sing-box 只监听 127.0.0.1 的 VLESS+WS，并安装 cloudflared 建立快速隧道，走 Cloudflare CDN 443 接入，无需任何公网入站端口。「起始端口」为本地 ws 端口。注意：快速隧道域名在机器重启后会变化，届时点一次「同步配置」即可自动更新链接与订阅；想优化连接速度可在「订阅中心」设置 CF 优选入口。"};
   $("#d-app").onchange = e=>{
     $("#d-desc").textContent = DESC[e.target.value] || "将在目标以 sing-box 内核部署该单协议，并自动完成端口映射。";
   };
@@ -1461,6 +1461,15 @@ window.openSubModal = async function(){
         </div>
         <p style="color:var(--muted);font-size:11px;margin-top:4px;line-height:1.6">已使用 = 订阅内节点真实流量统计（当前 <b>${tr.used_gb ?? 0} GB</b>，自动更新）；填了剩余流量 → 显示 已使用 / 已使用+剩余；留空 → 显示 已使用 / 9999 GB。「重置」= 清除手动设定。</p>
       </div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)">
+        <label style="display:block;font-size:12px;color:var(--muted)">⚡ CF 优选入口（CF隧道节点导出时替换连接地址）</label>
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+          <input class="input" id="sub-cf-entry" placeholder="优选域名或 IP，如 cloudflare.182682.xyz（留空=隧道域名）" style="flex:1;min-width:220px" value="${esc(info.cf_entry || "")}">
+          <button class="btn primary sm" id="btn-cf-entry-save">保存</button>
+          <button class="btn ghost sm" id="btn-cf-entry-clear">清除</button>
+        </div>
+        <p style="color:var(--muted);font-size:11px;margin-top:4px;line-height:1.6">对所有 VLESS-WS-CF 节点立即生效，客户端刷新订阅即可；节点的 servername/Host 保持隧道域名不变，不影响 Cloudflare 路由。可填 suoha 同款优选域名或用 CloudflareSpeedTest 测出的优选 IP。</p>
+      </div>
       <p style="color:var(--muted);font-size:11.5px;margin-top:12px;line-height:1.7">
         · 新部署节点后客户端刷新订阅即可拉取<br>
         · Token 泄露时可重置，旧链接立即失效<br></p>
@@ -1489,9 +1498,23 @@ window.openSubModal = async function(){
         toast("已清除手动设定（显示 9999G）","ok");
       }catch(e){ toast(e.message,"err"); }
     };
+    ov.querySelector("#btn-cf-entry-save").onclick = async ()=>{
+      const v = ov.querySelector("#sub-cf-entry").value.trim();
+      try{
+        const r = await api("/apps/cf-entry",{method:"POST",body:{entry:v}});
+        ov.querySelector("#sub-cf-entry").value = r.entry;
+        toast(r.entry ? `优选入口已设为 ${r.entry}，刷新订阅即生效` : "已清除优选入口","ok");
+      }catch(e){ toast(e.message,"err"); }
+    };
+    ov.querySelector("#btn-cf-entry-clear").onclick = async ()=>{
+      try{
+        await api("/apps/cf-entry",{method:"POST",body:{entry:""}});
+        ov.querySelector("#sub-cf-entry").value="";
+        toast("已清除优选入口（节点恢复用隧道域名连接）","ok");
+      }catch(e){ toast(e.message,"err"); }
+    };
   }catch(e){ toast(e.message,"err"); }
 };
-
 /* ══════════════ 视图：主机探针 ══════════════ */
 async function viewProbes(){
   $("#content").innerHTML = `

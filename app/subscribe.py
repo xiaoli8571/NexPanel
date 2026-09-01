@@ -121,6 +121,13 @@ def collect_specs() -> list[dict]:
         if not spec:
             continue
         pub_ip = params.get("public_ip") or ""
+        cf_entry = ""
+        if any(n.get("protocol") == "VLESS-WS-CF" for n in spec):
+            try:
+                from . import deploy as deploy_mod
+                cf_entry = (deploy_mod.get_cf_entry() or "").strip()
+            except Exception:
+                cf_entry = ""
         egd = params.get("egress") or {}
         eg = egd.get("mode", "native")
         eg_tag = {"warp_ipv4": "WARP·v4", "warp_ipv6": "WARP·v6",
@@ -131,6 +138,8 @@ def collect_specs() -> list[dict]:
             n = dict(n)
             n["_app"] = r["name"]
             n["_ip"] = pub_ip
+            if n.get("protocol") == "VLESS-WS-CF" and cf_entry:
+                n["entry"] = cf_entry  # 优选入口渲染时生效，改设置无需重新部署
             if eg_tag:
                 n["_egress"] = eg_tag
             out.append(n)
@@ -139,11 +148,26 @@ def collect_specs() -> list[dict]:
 
 def collect_links() -> list[str]:
     out = []
-    for r in db.q("SELECT links FROM apps WHERE status='done' ORDER BY id"):
+    for r in db.q("SELECT name, params, links FROM apps WHERE status='done' ORDER BY id"):
         try:
-            out.extend(json.loads(r["links"] or "[]"))
+            links = json.loads(r["links"] or "[]")
         except Exception:
             continue
+        # CF 隧道节点按当前优选入口重建链接（改设置即时生效）
+        try:
+            params = json.loads(r["params"] or "{}")
+            spec = params.get("spec") or []
+        except Exception:
+            spec = []
+        if any(n.get("protocol") == "VLESS-WS-CF" for n in spec):
+            try:
+                from . import deploy as deploy_mod
+                spec2 = [dict(n) for n in spec]
+                deploy_mod.apply_cf_entry(spec2)
+                links = deploy_mod.build_links(spec2, params.get("public_ip") or "", r["name"])
+            except Exception:
+                pass
+        out.extend(links)
     # VMess 已弃用：历史存量 vmess:// 链接一律不再下发
     return [l for l in out if not str(l).startswith("vmess://")]
 
@@ -209,11 +233,12 @@ def _clash_proxy(n: dict, name: str, ip: str) -> str | None:
         L.append("    udp: true"); w("network", "ws")
         L.append("    ws-opts:"); w("path", "/", 6)
     elif proto == "VLESS-WS-CF":
-        # CF 隧道节点：server 用隧道域名（Cloudflare 边缘），443+TLS+WS
+        # CF 隧道节点：server 优先用优选入口，servername/Host 保持隧道域名（CF 靠它路由）
         domain = (n.get("argo_domain") or "").replace("https://", "").rstrip("/")
         if not domain:
             return None  # 域名缺失（隧道未建立）时跳过，避免输出死节点
-        L.append(f"  - name: {_y(name)}"); w("type", "vless"); w("server", domain)
+        server = (n.get("entry") or "").strip() or domain
+        L.append(f"  - name: {_y(name)}"); w("type", "vless"); w("server", server)
         L.append("    port: 443")
         w("uuid", uuid_)
         L.append("    udp: true"); L.append("    tls: true"); w("servername", domain)

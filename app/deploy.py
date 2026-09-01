@@ -220,7 +220,8 @@ def build_links(nodes_spec, ip: str, name_prefix: str) -> list[str]:
             domain = (n.get("argo_domain") or "").replace("https://", "").rstrip("/")
             if not domain:
                 continue  # 隧道域名缺失的节点不生成死链接
-            links.append(f"vless://{n['uuid']}@{domain}:443?encryption=none"
+            server = (n.get("entry") or "").strip() or domain
+            links.append(f"vless://{n['uuid']}@{server}:443?encryption=none"
                          f"&security=tls&type=ws&host={quote(domain)}"
                          f"&path=%2F&sni={quote(domain)}#{remark}")
         elif proto == "SS-2022":
@@ -641,6 +642,7 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
 
         # 4) 生成分享链接
         pub = _node_public_ip(node) or "NODE_IP"
+        apply_cf_entry(spec)
         links = build_links(spec, pub, name_prefix)
         _log(j, f"[5] 部署完成！生成 {len(links)} 条分享链接")
         j["status"] = "done"
@@ -813,12 +815,32 @@ def _refresh_argo_domains(container_id: int | None, node_id: int, out: str) -> i
                 dirty = True
         if not dirty:
             continue
+        apply_cf_entry(spec)
         links = build_links(spec, params.get("public_ip") or "", r["name"])
         db.ex("UPDATE apps SET params=?, links=? WHERE id=?",
               (json.dumps(params, ensure_ascii=False),
                json.dumps(links, ensure_ascii=False), r["id"]))
         changed += 1
     return changed
+
+
+def get_cf_entry() -> str:
+    """全局 CF 优选入口（settings: cf_entry），空 = 用隧道域名本身"""
+    from . import subscribe as sub_mod
+    return (sub_mod.get_setting("cf_entry") or "").strip()
+
+
+def apply_cf_entry(specs: list[dict]) -> list[dict]:
+    """为 CF 隧道节点注入优选入口（settings: cf_entry，留空=用隧道域名本身）。
+    渲染订阅/链接时即时调用，修改设置后对所有 CF 节点立即生效，无需重新部署。"""
+    entry = get_cf_entry()
+    for n in specs:
+        if n.get("protocol") == "VLESS-WS-CF":
+            if entry:
+                n["entry"] = entry
+            else:
+                n.pop("entry", None)
+    return specs
 
 
 async def _prepare_container_tools(node: dict, cname: str, j: dict):

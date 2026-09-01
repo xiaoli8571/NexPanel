@@ -1148,6 +1148,15 @@ def list_apps(user: dict = Depends(current_user)):
             d["dnat_rules"] = json.loads(d["dnat_rules"] or "[]")
         except Exception:
             d["dnat_rules"] = []
+        # CF 隧道节点链接按当前优选入口重建（与订阅导出保持一致）
+        if any(n.get("protocol") == "VLESS-WS-CF" for n in d["spec"]):
+            try:
+                spec2 = [dict(n) for n in d["spec"]]
+                deploy_mod.apply_cf_entry(spec2)
+                d["links"] = deploy_mod.build_links(
+                    spec2, d["public_ip"] or "", d["name"])
+            except Exception:
+                pass
         d.pop("params", None)
         out.append(d)
     return out
@@ -1273,6 +1282,7 @@ def sub_info(request: Request, user: dict = Depends(current_user)):
         "clash_url": f"{base}/api/sub/{tok}?target=clash",
         "nodes": n,
         "traffic": sub_mod.get_sub_traffic(),
+        "cf_entry": sub_mod.get_setting("cf_entry") or "",
     }
 
 
@@ -1284,6 +1294,24 @@ def sub_reset(request: Request, admin: dict = Depends(require_admin)):
     base = _panel_base(request)
     db.audit(admin["sub"], "重置订阅令牌", "system", "", request.client.host)
     return {"ok": True, "token": tok, "url": f"{base}/api/sub/{tok}"}
+
+
+class CfEntryIn(BaseModel):
+    entry: str = ""
+
+
+@router.post("/apps/cf-entry")
+def cf_entry_set(body: CfEntryIn, request: Request,
+                 admin: dict = Depends(require_admin)):
+    """设置 CF 优选入口：所有 CF 隧道节点导出时 server 用它（空=隧道域名本身）。
+    优选入口仅做连接地址，servername/Host 仍是隧道域名，不影响 CF 路由。"""
+    from . import subscribe as sub_mod
+    entry = (body.entry or "").strip().replace("https://", "").replace("http://", "").rstrip("/")
+    if entry and not re.fullmatch(r"[A-Za-z0-9._\-]+", entry):
+        raise HTTPException(400, "优选入口仅支持域名或 IP，如 cloudflare.182682.xyz")
+    sub_mod.set_setting("cf_entry", entry)
+    db.audit(admin["sub"], "设置CF优选入口", entry or "(清除)", request.client.host)
+    return {"ok": True, "entry": entry}
 
 
 class SubTrafficIn(BaseModel):
