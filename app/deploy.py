@@ -286,7 +286,7 @@ if [ -n "$CF_PORTS" ]; then
 Description=cloudflared tunnel :$P (NexPanel)
 After=network.target
 [Service]
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:0 --url http://127.0.0.1:$P
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:0 --url http://127.0.0.1:$P
 Restart=always
 RestartSec=5
 StandardOutput=append:$LOGF
@@ -304,7 +304,7 @@ UNIT
         cat > "/etc/init.d/cloudflared-$P" <<RC
 #!/sbin/openrc-run
 command="/usr/local/bin/cloudflared"
-command_args="tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:0 --url http://127.0.0.1:$P"
+command_args="tunnel --no-autoupdate --metrics 127.0.0.1:0 --url http://127.0.0.1:$P"
 pidfile="/run/cloudflared-$P.pid"
 command_background="yes"
 output_log="$LOGF"
@@ -321,7 +321,7 @@ RC
 #!/bin/sh
 pkill -f "cloudflared tunnel.*127.0.0.1:$P" 2>/dev/null || true
 sleep 1
-nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:0 --url http://127.0.0.1:$P >>"$LOGF" 2>&1 &
+nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:0 --url http://127.0.0.1:$P >>"$LOGF" 2>&1 &
 echo \$! > "/run/cloudflared-$P.pid"
 BG
         chmod +x "/etc/cloudflared/run-$P.sh"
