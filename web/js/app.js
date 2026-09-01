@@ -1036,6 +1036,7 @@ async function viewApps(){
               <option value="naive">Naive</option>
               <option value="vless-ws">VLESS + WS</option>
               <option value="ss-2022">Shadowsocks 2022</option>
+              <option value="vless-ws-cf">☁️ CF隧道 VLESS+WS (被墙/NAT适用)</option>
             </select></label>
           <label>起始端口 *<input id="d-port" type="number" value="8881" min="1024" max="65528"></label>
           <label>SNI 伪装域名<input id="d-sni" list="sni-list" placeholder="addons.mozilla.org"></label>
@@ -1091,7 +1092,8 @@ async function viewApps(){
   }catch(e){}
 
   const DESC = {
-    "xui-8in1":"将向目标一次性下发 8 个防封协议（起始端口连续占用 8 个），自动生成 Reality 密钥对、自签证书；容器模式还会在宿主节点配置 DNAT 端口映射。"};
+    "xui-8in1":"将向目标一次性下发 8 个防封协议（起始端口连续占用 8 个），自动生成 Reality 密钥对、自签证书；容器模式还会在宿主节点配置 DNAT 端口映射。",
+    "vless-ws-cf":"🎯 专治 IP被墙 / NAT小鸡 / 只出不进机器：本机 sing-box 只监听 127.0.0.1 的 VLESS+WS，并安装 cloudflared 建立快速隧道，走 Cloudflare CDN 443 接入，无需任何公网入站端口。「起始端口」为本地 ws 端口。注意：快速隧道域名在机器重启后会变化，届时点一次「同步配置」即可自动更新链接与订阅。"};
   $("#d-app").onchange = e=>{
     $("#d-desc").textContent = DESC[e.target.value] || "将在目标以 sing-box 内核部署该单协议，并自动完成端口映射。";
   };
@@ -1202,6 +1204,7 @@ async function loadApps(){
     const isAll = selected === "all";
     const groups = new Map();
     list.forEach(a=>{
+      if(!(a.spec||[]).length) return;  // 无节点的记录(如失败部署)不生成空分组
       const mkey = a.container_id ? `c-${a.container_id}` : `h-${a.node_id}`;
       if(!isAll && mkey !== selected) return;
       const machineName = a.container_id ? (a.container || a.name || "容器") : (a.node_name || a.name || "主机");

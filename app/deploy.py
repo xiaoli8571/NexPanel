@@ -7,6 +7,7 @@
 """
 import base64
 import json
+import re
 import secrets
 import time
 
@@ -43,6 +44,8 @@ CATALOG = {
     "vless-ws":     {"label": "VLESS + WS", "single": {"protocol": "VLESS-WS"}},
     # VMess 已整体移除（Clash 订阅缺 cipher 字段导致导入报错，弃用）
     "ss-2022":      {"label": "Shadowsocks 2022", "single": {"protocol": "SS-2022"}},
+    "vless-ws-cf":  {"label": "☁️ CF隧道 VLESS+WS (被墙/NAT适用)",
+                     "single": {"protocol": "VLESS-WS-CF"}},
 }
 
 
@@ -110,6 +113,11 @@ def build_singbox_config(nodes_spec: list[dict], cert_path="/etc/sing-box/cert.p
         base = {"tag": tag, "listen": "::", "listen_port": port}
         if proto == "VLESS-WS":
             conf["inbounds"].append({**base, "type": "vless",
+                "users": [{"uuid": uuid_}],
+                "transport": {"type": "ws", "path": "/"}})
+        elif proto == "VLESS-WS-CF":
+            # CF 隧道节点：只监听 127.0.0.1，由 cloudflared 回源接入，不暴露公网端口
+            conf["inbounds"].append({**base, "listen": "127.0.0.1", "type": "vless",
                 "users": [{"uuid": uuid_}],
                 "transport": {"type": "ws", "path": "/"}})
         elif proto == "SS-2022":
@@ -208,6 +216,13 @@ def build_links(nodes_spec, ip: str, name_prefix: str) -> list[str]:
         elif proto == "VLESS-WS":
             links.append(f"vless://{n['uuid']}@{ip}:{port}?type=ws&path=%2F"
                          f"&host={quote(ip)}#{remark}")
+        elif proto == "VLESS-WS-CF":
+            domain = (n.get("argo_domain") or "").replace("https://", "").rstrip("/")
+            if not domain:
+                continue  # 隧道域名缺失的节点不生成死链接
+            links.append(f"vless://{n['uuid']}@{domain}:443?encryption=none"
+                         f"&security=tls&type=ws&host={quote(domain)}"
+                         f"&path=%2F&sni={quote(domain)}#{remark}")
         elif proto == "SS-2022":
             userinfo = base64.b64encode(
                 f"2022-blake3-aes-128-gcm:{n['password']}".encode()).decode()
@@ -216,7 +231,130 @@ def build_links(nodes_spec, ip: str, name_prefix: str) -> list[str]:
 
 
 # ────────────── 在容器内落地 sing-box 的脚本 ──────────────
-def container_install_script(config_json: dict) -> str:
+# CF 快速隧道(trycloudflare)管理块：为每个 VLESS-WS-CF 节点维持一条 cloudflared 隧道。
+# 端口列表经 __CF_PORTS__ 占位符替换注入；不涉及 CF 节点时整块跳过。
+_ARGO_BLOCK = r'''
+# ───── CF 隧道(cloudflared) 管理 ─────
+CF_PORTS="__CF_PORTS__"
+if [ -n "$CF_PORTS" ]; then
+  if [ ! -x /usr/local/bin/cloudflared ]; then
+    case "$SB_ARCH" in arm64) CD_ARCH=arm64;; *) CD_ARCH=amd64;; esac
+    rm -f /tmp/cfd
+    for i in 1 2 3; do
+      curl -fSL --retry 2 --connect-timeout 15 \
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CD_ARCH}" \
+        -o /tmp/cfd && break
+      sleep 3
+    done
+    [ -s /tmp/cfd ] || { echo "[FAIL] cloudflared 下载失败"; exit 1; }
+    mv /tmp/cfd /usr/local/bin/cloudflared
+    chmod +x /usr/local/bin/cloudflared
+  fi
+  mkdir -p /etc/cloudflared/managed /var/log
+  # 清理已不在当前配置中的托管隧道
+  for f in /etc/cloudflared/managed/*; do
+    [ -f "$f" ] || continue
+    OP=$(basename "$f")
+    keep=0
+    for P in $CF_PORTS; do [ "$P" = "$OP" ] && keep=1; done
+    if [ "$keep" = "0" ]; then
+      if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now "cloudflared-$OP" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/cloudflared-$OP.service"
+      elif command -v rc-service >/dev/null 2>&1 && command -v openrc-run >/dev/null 2>&1; then
+        rc-service "cloudflared-$OP" stop >/dev/null 2>&1 || true
+        rc-update del "cloudflared-$OP" default >/dev/null 2>&1 || true
+        rm -f "/etc/init.d/cloudflared-$OP"
+      else
+        pkill -f "cloudflared tunnel.*127.0.0.1:$OP" 2>/dev/null || true
+        if command -v crontab >/dev/null 2>&1; then
+          (crontab -l 2>/dev/null | grep -v "cloudflared-$OP") | crontab - >/dev/null 2>&1 || true
+        fi
+      fi
+      rm -f "$f" "/etc/cloudflared/run-$OP.sh"
+      echo "[ARGO-CLEAN] $OP"
+    fi
+  done
+  for P in $CF_PORTS; do
+    LOGF="/var/log/argo-$P.log"
+    touch "$LOGF"
+    SVC_UP=0
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      if ! systemctl is-active "cloudflared-$P" >/dev/null 2>&1; then
+        cat > "/etc/systemd/system/cloudflared-$P.service" <<UNIT
+[Unit]
+Description=cloudflared tunnel :$P (NexPanel)
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:0 --url http://127.0.0.1:$P
+Restart=always
+RestartSec=5
+StandardOutput=append:$LOGF
+StandardError=append:$LOGF
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable "cloudflared-$P" >/dev/null 2>&1 || true
+        systemctl start "cloudflared-$P" >/dev/null 2>&1 || true
+      fi
+      systemctl is-active "cloudflared-$P" >/dev/null 2>&1 && SVC_UP=1
+    elif command -v rc-service >/dev/null 2>&1 && command -v openrc-run >/dev/null 2>&1; then
+      if ! rc-service "cloudflared-$P" status >/dev/null 2>&1; then
+        cat > "/etc/init.d/cloudflared-$P" <<RC
+#!/sbin/openrc-run
+command="/usr/local/bin/cloudflared"
+command_args="tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:0 --url http://127.0.0.1:$P"
+pidfile="/run/cloudflared-$P.pid"
+command_background="yes"
+output_log="$LOGF"
+error_log="$LOGF"
+RC
+        chmod +x "/etc/init.d/cloudflared-$P"
+        rc-update add "cloudflared-$P" default >/dev/null 2>&1 || true
+        rc-service "cloudflared-$P" start >/dev/null 2>&1 || true
+      fi
+      rc-service "cloudflared-$P" status >/dev/null 2>&1 && SVC_UP=1
+    else
+      if ! pgrep -f "cloudflared tunnel.*127.0.0.1:$P" >/dev/null 2>&1; then
+        cat > "/etc/cloudflared/run-$P.sh" <<BG
+#!/bin/sh
+pkill -f "cloudflared tunnel.*127.0.0.1:$P" 2>/dev/null || true
+sleep 1
+nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:0 --url http://127.0.0.1:$P >>"$LOGF" 2>&1 &
+echo \$! > "/run/cloudflared-$P.pid"
+BG
+        chmod +x "/etc/cloudflared/run-$P.sh"
+        "/etc/cloudflared/run-$P.sh" || true
+        if command -v crontab >/dev/null 2>&1; then
+          (crontab -l 2>/dev/null | grep -v "run-$P.sh"; \
+           echo "@reboot /etc/cloudflared/run-$P.sh >/dev/null 2>&1") | crontab - >/dev/null 2>&1 || true
+        fi
+      fi
+      pgrep -f "cloudflared tunnel.*127.0.0.1:$P" >/dev/null 2>&1 && SVC_UP=1
+    fi
+    echo "$P" > "/etc/cloudflared/managed/$P"
+    DOM=""
+    if [ "$SVC_UP" = "1" ]; then
+      for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        DOM=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOGF" 2>/dev/null | tail -n 1)
+        [ -n "$DOM" ] && break
+        sleep 2
+      done
+    fi
+    if [ -n "$DOM" ]; then
+      echo "[ARGO:$P] $DOM"
+      echo "[OK] cloudflared :$P up ($DOM)"
+    else
+      echo "[FAIL] cloudflared :$P 未获取到隧道域名（查看 $LOGF）"
+      exit 1
+    fi
+  done
+fi
+'''
+
+
+def container_install_script(config_json: dict, nodes_spec: list[dict] | None = None) -> str:
     cfg_b64 = base64.b64encode(json.dumps(config_json).encode()).decode()
     return r'''
 set -e
@@ -350,7 +488,9 @@ if pidof sing-box >/dev/null 2>&1 || pgrep -f "sing-box run" >/dev/null 2>&1 \
 else
   echo "[FAIL] sing-box not running（查看 /var/log/singbox.log）"; exit 1
 fi
-'''
+''' + _ARGO_BLOCK.replace("__CF_PORTS__", " ".join(
+    str(int(n["port"])) for n in (nodes_spec or [])
+    if n.get("protocol") == "VLESS-WS-CF"))
 
 
 # ══════════════ 任务执行器(面板侧) ══════════════
@@ -440,7 +580,7 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         if len(all_spec) > len(spec):
             _log(j, f"    合并已有 {len(all_spec)-len(spec)} 个历史节点 + 新增 {len(spec)} 个 = {len(all_spec)}")
         conf = build_singbox_config(all_spec)
-        script = container_install_script(conf)
+        script = container_install_script(conf, all_spec)
         import base64 as b64mod
         inner = b64mod.b64encode(script.encode()).decode()
         if host_target:
@@ -461,8 +601,20 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         for ln in out.splitlines():
             if ln.strip():
                 _log(j, "    " + ln[:150])
-        if "[OK]" not in out:
+        if "[OK]" not in out or "[FAIL]" in out:
             raise RuntimeError(f"容器内部署失败(rc={rc})")
+
+        # CF 隧道域名回填（脚本输出形如 [ARGO:8881] https://xxx.trycloudflare.com）
+        argo_map = {p: d.rstrip("/") for p, d in
+                    re.findall(r"\[ARGO:(\d+)\]\s*(\S+)", out)}
+        for n in all_spec:
+            if n.get("protocol") == "VLESS-WS-CF":
+                dom = argo_map.get(str(n["port"]), "")
+                if not dom:
+                    raise RuntimeError(f"CF 隧道端口 {n['port']} 未获取到域名")
+                n["argo_domain"] = dom
+                _log(j, f"    CF 隧道 :{n['port']} → {dom}")
+        _refresh_argo_domains((container or {}).get("id"), node["id"], out)
 
         # 3) 宿主侧 DNAT 映射（仅容器模式需要）
         dnat_rules = []
@@ -471,6 +623,8 @@ async def run_deploy(job_id: str, container: dict | None, node: dict,
         else:
             _log(j, "[4] 配置宿主端口转发(DNAT) …")
             for n in spec:
+                if n["protocol"] == "VLESS-WS-CF":
+                    continue  # CF 隧道节点只出不进，无需 DNAT
                 proto_flag = "-p udp" if n["protocol"] in ("Hysteria2", "TUIC") else "-p tcp"
                 dport = n["port"]
                 rules = [
@@ -618,10 +772,53 @@ async def _sync_machine_singbox(container_id: int | None, node_id: int,
     except Exception:
         pass
     host_target = container_id is None
-    rc, out = await _apply_singbox_config(node, container, conf, host_target, j)
+    rc, out = await _apply_singbox_config(node, container, conf, specs, host_target, j)
     if "[OK]" not in out:
         raise RuntimeError(f"远端更新失败: {out[-200:]}")
+    n_upd = _refresh_argo_domains(container_id, node_id, out)
+    if n_upd:
+        _log(j, f"[ARGO] 已回填 {n_upd} 个应用的最新隧道域名")
     return True
+
+
+def _refresh_argo_domains(container_id: int | None, node_id: int, out: str) -> int:
+    """从脚本输出回填 CF 隧道最新域名到 DB（快速隧道重启后域名会变）"""
+    argo_map = {p: d.rstrip("/") for p, d in
+                re.findall(r"\[ARGO:(\d+)\]\s*(\S+)", out)}
+    if not argo_map:
+        return 0
+    if container_id is not None:
+        rows = db.q("SELECT * FROM apps WHERE status='done' AND container_id=?",
+                    (container_id,))
+    else:
+        rows = db.q("SELECT * FROM apps WHERE status='done' AND container_id IS NULL "
+                    "AND (node_id=? OR (node_id IS NULL AND "
+                    "name=(SELECT name FROM nodes WHERE id=?)))", (node_id, node_id))
+    changed = 0
+    for r in rows:
+        try:
+            params = json.loads(r["params"] or "{}")
+            spec = params.get("spec") or []
+        except Exception:
+            continue
+        if not any(n.get("protocol") == "VLESS-WS-CF" for n in spec):
+            continue
+        dirty = False
+        for n in spec:
+            if n.get("protocol") != "VLESS-WS-CF":
+                continue
+            dom = argo_map.get(str(n.get("port")), "")
+            if dom and dom != n.get("argo_domain"):
+                n["argo_domain"] = dom
+                dirty = True
+        if not dirty:
+            continue
+        links = build_links(spec, params.get("public_ip") or "", r["name"])
+        db.ex("UPDATE apps SET params=?, links=? WHERE id=?",
+              (json.dumps(params, ensure_ascii=False),
+               json.dumps(links, ensure_ascii=False), r["id"]))
+        changed += 1
+    return changed
 
 
 async def _prepare_container_tools(node: dict, cname: str, j: dict):
@@ -680,9 +877,10 @@ def _container_wrappers(inner: str, cname: str) -> list[str]:
 
 
 async def _apply_singbox_config(node: dict, container: dict | None, conf: dict,
-                               host_target: bool, j: dict) -> tuple[int, str]:
+                                specs: list[dict] | None, host_target: bool,
+                                j: dict) -> tuple[int, str]:
     """把 sing-box 配置下发到目标（主机直装 或 容器内），并重启服务"""
-    script = container_install_script(conf)
+    script = container_install_script(conf, specs)
     inner = base64.b64encode(script.encode()).decode()
     if host_target:
         wrapper = f"printf %s {inner} | base64 -d | bash"

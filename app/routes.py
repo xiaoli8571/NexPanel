@@ -1110,6 +1110,7 @@ async def node_residential_uninstall(nid: int, request: Request,
 
 @router.get("/apps")
 def list_apps(user: dict = Depends(current_user)):
+    # 只返回部署成功的应用：failed 记录无 spec，若返回会在前端留下"0 节点"空分组
     rows = db.q("""
         SELECT a.id, a.container_id, a.node_id, a.name, a.app_type, a.params,
                a.links, a.dnat_rules, a.status, a.created_at,
@@ -1117,6 +1118,7 @@ def list_apps(user: dict = Depends(current_user)):
         FROM apps a
         LEFT JOIN containers c ON c.id=a.container_id
         LEFT JOIN nodes n ON n.id=a.node_id
+        WHERE a.status='done'
         ORDER BY a.id DESC""")
     out = []
     for r in rows:

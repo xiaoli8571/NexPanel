@@ -208,6 +208,18 @@ def _clash_proxy(n: dict, name: str, ip: str) -> str | None:
         w("uuid", uuid_)
         L.append("    udp: true"); w("network", "ws")
         L.append("    ws-opts:"); w("path", "/", 6)
+    elif proto == "VLESS-WS-CF":
+        # CF 隧道节点：server 用隧道域名（Cloudflare 边缘），443+TLS+WS
+        domain = (n.get("argo_domain") or "").replace("https://", "").rstrip("/")
+        if not domain:
+            return None  # 域名缺失（隧道未建立）时跳过，避免输出死节点
+        L.append(f"  - name: {_y(name)}"); w("type", "vless"); w("server", domain)
+        L.append("    port: 443")
+        w("uuid", uuid_)
+        L.append("    udp: true"); L.append("    tls: true"); w("servername", domain)
+        w("network", "ws")
+        L.append("    ws-opts:"); w("path", "/", 6)
+        L.append("      headers:"); w("Host", domain, 8)
     elif proto == "SS-2022":
         L.append(f"  - name: {_y(name)}"); w("type", "ss"); w("server", ip); L.append(f"    port: {port}")
         w("cipher", "2022-blake3-aes-128-gcm"); w("password", pwd); L.append("    udp: true")
