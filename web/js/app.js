@@ -477,6 +477,7 @@ async function viewNodes(){
             <button class="btn sm" data-probe="${n.id}">${icon("activity",12)} 测试</button>
             <button class="btn sm" data-rename="${n.id}" data-name="${esc(n.name)}" title="重命名节点">✏️ 重命名</button>
             ${n.kind==="agent"?`<button class="btn sm" data-agent-cmd="${n.id}" title="查看接入命令">${icon("term",12)} 接入</button>`:""}
+            ${n.kind==="agent"&&n.status==="online"?`<button class="btn sm" data-upgrade-agent="${n.id}" title="升级到面板提供的最新版 Agent">⬆️ 升级 Agent</button>`:""}
             ${(n.kind==="ssh"||n.kind==="agent")&&(n.status==="online"||n.status==="nolxc")?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="母机控制台">${icon("server",12)} 终端</button>`:""}
             ${n.kind==="demo"?`<button class="btn sm" data-term="${n.id}" data-name="${esc(n.name)}" title="演示控制台">${icon("server",12)} 终端</button>`:""}
             ${(n.kind==="agent"||n.kind==="ssh")&&!isProbe?`<button class="btn sm" data-import-lxc="${n.id}" title="把宿主机已有的 LXC 容器导入面板">${icon("server",12)} 导入LXC</button>`:""}
@@ -516,6 +517,21 @@ async function viewNodes(){
         const n = (await api("/nodes")).find(x=>String(x.id)===b.dataset.agentCmd);
         if(!n?.install_cmd){ toast("未生成安装命令","err"); return; }
         showAgentCmdModal(n);
+      });
+      $$("#node-grid [data-upgrade-agent]").forEach(b=>b.onclick=async()=>{
+        const yes = await confirmModal(
+          "确认升级该节点的 Agent？升级期间节点会短暂离线，通常数秒后自动恢复。", true);
+        if(!yes) return;
+        b.disabled=true;
+        b.textContent="升级中…";
+        try{
+          const r = await api(`/nodes/${b.dataset.upgradeAgent}/upgrade-agent`, {method:"POST"});
+          toast(r.note || "Agent 升级命令已下发，请稍后确认节点重新上线", "ok", 6000);
+        }catch(e){
+          toast(String(e.message).slice(0,160), "err", 5000);
+          b.disabled=false;
+          b.textContent="⬆️ 升级 Agent";
+        }
       });
       $$("#node-grid [data-uninst]").forEach(b=>b.onclick=async()=>{
         const n = (await api("/nodes")).find(x=>String(x.id)===b.dataset.uninst);
@@ -2436,7 +2452,9 @@ function openTermModal(title, wsUrl, opts={}){
     }
     if(atBottom) out.scrollTop = out.scrollHeight;
   };
-  repaint = setInterval(paint, 120);
+  // 行级增量重绘本身很便宜（未变行直接命中缓存），节拍太快只会白烧 CPU；
+  // 120ms 会把「按键 → 看到」再拖慢一拍，30ms 在移动端也扛得住。
+  repaint = setInterval(paint, 30);
 
   // 视口变化（旋转/软键盘弹出）→ 防抖重新适配终端尺寸
   let rsTimer = null;

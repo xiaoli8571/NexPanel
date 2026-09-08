@@ -153,6 +153,27 @@ curl -fsSL https://<panel>/api/agent/uninstall.sh | sh
 journalctl -u lxcdeck-agent -f
 ```
 
+#### 控制台（母机/容器终端）链路 / Terminal link
+
+终端走的是 **浏览器 ⇄ WebSocket ⇄ 面板 ⇄ HTTP 轮询 ⇄ Agent ⇄ PTY**（Agent 只需出站 443，
+不需要任何入站端口，所以 NAT 后的 VPS 也能接管）。链路上几个关键设计：
+
+| 环节 | 做法 | 为什么 |
+|---|---|---|
+| 命令下发 | `/api/agent/poll` 长轮询（无命令时挂起 `POLL_HOLD` 秒，命令一入队即返回） | 按键不必等下一个轮询周期 |
+| Agent → 面板 | `http.client` 常驻连接（线程级 keep-alive，断线自动重连） | 省掉每次请求的 TCP+TLS 握手（跨境约 2–3 个 RTT） |
+| PTY 输出 | 事件驱动 + 8ms 合并窗口（不是固定 sleep 节拍） | 单键回显近零等待，海量输出仍聚块 |
+| 慢指标 | 公网 IP / 外网延迟探测放后台线程，主循环只读缓存 | 一个被墙的探测不会拖住终端 |
+| 面板侧 | poll 落库走工作线程 + 30s 节流；流量按「速率×时长」内存累计后合并写库 | 同步 SQLite 提交不会钉住事件循环 |
+
+实测（面板机 → Agent 单程，中位数）：本机节点 189ms→11ms，跨境 ≈1 个网络 RTT（已到该架构下限）。
+
+改完 `app/agent.py` 里的 `AGENT_PY` 后：面板代码要先部署到面板机，再到「节点管理」点
+**⬆️ 升级 Agent**（或 `POST /api/agents/upgrade-all`）把新版脚本推到各节点——节点侧自升级会
+先下载、校验 `AGENT_VER` 字面量指纹、原子替换、重启，失败自动回滚。
+`AGENT_VER` 与内嵌脚本里的定义必须一致（`tests/test_codeaudit.py` 会检查）。
+
+
 ### 订阅 / Subscription
 
 ```bash

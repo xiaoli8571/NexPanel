@@ -210,6 +210,18 @@ async def _agent_pty_ws(ws: WebSocket, node: dict, cmd: str):
             if chunk == "__CLOSED__":
                 await _ws_out(ws, "\r\n[面板] 远端会话已结束。\r\n")
                 return
+            # 把此刻已积压的分块并成一条 WS 消息（不等待，纯 non-blocking 抽取）：
+            # 海量输出时帧数骤降，单键回显仍是「到一帧就发一帧」
+            for _ in range(64):
+                try:
+                    extra = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if extra == "__CLOSED__":
+                    await _ws_out(ws, chunk)
+                    await _ws_out(ws, "\r\n[面板] 远端会话已结束。\r\n")
+                    return
+                chunk += extra
             await _ws_out(ws, chunk)
 
     pt = asyncio.create_task(pump())

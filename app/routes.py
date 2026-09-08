@@ -471,6 +471,11 @@ def delete_node(nid: int, request: Request, force: int = 0,
         db.ex(f"DELETE FROM apps WHERE id IN ({ph})", *ids)
 
     db.ex("DELETE FROM nodes WHERE id=?", (nid,))
+    # 面板侧内存状态一并清掉：否则被删节点的旧 agent_token 仍在缓存里能通过鉴权
+    try:
+        agent_mod.forget_node(nid)
+    except Exception:
+        pass
     # 清理监控/审计为“尽力而为”，即使 VPS 已删除也不影响节点删除成功
     try:
         monitor.stop_node(nid)
@@ -731,13 +736,18 @@ def uninstall_sh():
 
 
 def _agent_auth(request: _Req) -> int:
-    """校验 Agent Bearer Token，返回 node_id"""
+    """校验 Agent Bearer Token，返回 node_id（token→node 命中内存缓存，避免每请求打 SQLite）"""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer ag_"):
         raise HTTPException(401, "bad agent")
-    row = db.one("SELECT id FROM nodes WHERE agent_token=?", (auth[7:],))
+    tok = auth[7:]
+    nid = agent_mod.node_id_by_token(tok)
+    if nid is not None:
+        return nid
+    row = db.one("SELECT id FROM nodes WHERE agent_token=?", (tok,))
     if not row:
         raise HTTPException(401, "unknown agent")
+    agent_mod.remember_token(tok, row["id"])
     return row["id"]
 
 
@@ -749,23 +759,30 @@ async def agent_poll(request: _Req):
     except Exception:
         report = {}
     agent_mod.touch(nid)
+    # 指标落库是同步 SQLite：放工作线程，别把事件循环堵住
+    # （堵住的直接后果就是终端按键/回显在浏览器端卡成几秒）
+    await asyncio.to_thread(_poll_side_effects, nid, report)
+    hold = agent_mod.POLL_HOLD if agent_mod.pty_active(nid) else agent_mod.POLL_HOLD_IDLE
+    cmds = await agent_mod.poll_commands(nid, hold)
+    return {"commands": cmds, "hold": hold}
+
+
+def _poll_side_effects(nid: int, report: dict):
+    """一次 poll 的副作用：指标入缓存 + 按需自动下发 LXC 安装（同步 DB 活，跑在线程里）"""
     monitor.agent_report(nid, report)
     # 如果接入时选择"作为母机"，且目标机未安装 LXC，自动下发一次安装命令（15分钟去重）
     node = db.one("SELECT * FROM nodes WHERE id=?", (nid,))
     if node and node["install_lxc"] and not node["lxc_ok"]:
-        import time as _time
         import datetime as _dt
         last = node["lxc_install_ts"] or ""
         try:
             last_ts = _dt.datetime.strptime(last, "%Y-%m-%d %H:%M:%S").timestamp()
         except Exception:
             last_ts = 0
-        if _time.time() - last_ts > 900:
+        if time.time() - last_ts > 900:
             agent_mod.queue_exec(nid, nodes_mod.INSTALL_SH, timeout=900)
             db.ex("UPDATE nodes SET lxc_install_ts=? WHERE id=?", (db.now(), nid))
             db.audit("system", "自动安装LXC", node["name"], "agent接入后按需安装", "")
-    cmds = agent_mod.pop_pending(nid)
-    return {"commands": cmds}
 
 
 @router.post("/agent/result")
@@ -802,6 +819,7 @@ def rotate_token(nid: int, admin: dict = Depends(require_admin)):
         raise HTTPException(400, "仅 Agent 节点支持")
     tok = agent_mod.new_token()
     db.ex("UPDATE nodes SET agent_token=? WHERE id=?", (tok, nid))
+    agent_mod.forget_token(nid)          # 旧 token 立刻失效：别让缓存继续认它
     return {"ok": True, "agent_token": tok}
 
 

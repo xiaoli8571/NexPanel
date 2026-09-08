@@ -13,6 +13,7 @@
 - Agent 节点：心跳报告中的 rx_kbps/tx_kbps
 """
 import json
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -103,6 +104,62 @@ def record_traffic(node_id: int, rx_kbps: float, tx_kbps: float):
           "rx_bytes = rx_bytes + excluded.rx_bytes, "
           "tx_bytes = tx_bytes + excluded.tx_bytes",
           node_id, today, rx_bytes, tx_bytes)
+
+
+# ── 批量累计：Agent 心跳很密集（终端会话期间一秒好几次），逐条落库会把
+#    事件循环钉在 SQLite 提交上（终端回显因此被拖慢）。这里按节点在内存里累计，
+#    每 FLUSH_S 秒合并成一笔写库，总量不变但写次数下降一个数量级。
+FLUSH_S = 30.0
+_pending: dict[int, dict] = {}          # node_id -> {"rx":bytes,"tx":bytes,"date":..}
+_flush_t: dict[int, float] = {}         # node_id -> 上次落库时间
+_last_s: dict[int, float] = {}          # node_id -> 上次采样时间(算 dt 用)
+_pending_lock = threading.Lock()
+
+
+def accumulate_traffic(node_id: int, rx_kbps: float, tx_kbps: float, dt: float | None = None):
+    """按「速率 × 距上次采样的秒数」在内存累计，到达合并窗口再一笔写库。
+
+    dt 缺省取本节点自上次采样以来的真实间隔——这样无论 Agent 轮询快慢，
+    累计量都对得上（原来固定「每次采样=1 秒」，轮询周期一变统计就漂）。"""
+    now = time.time()
+    with _pending_lock:
+        prev = _last_s.get(node_id)
+        _last_s[node_id] = now
+        span = dt if (dt and dt > 0) else ((now - prev) if prev else 0.0)
+        span = max(min(span, 300.0), 0.0)
+        p = _pending.setdefault(node_id, {"rx": 0, "tx": 0, "date": db.now()[:10]})
+        p["rx"] += int(max(rx_kbps, 0) * 1000 / 8 * span)
+        p["tx"] += int(max(tx_kbps, 0) * 1000 / 8 * span)
+        if now - _flush_t.get(node_id, 0.0) < FLUSH_S:
+            return                       # 还没到合并窗口，继续在内存攒
+        _flush_t[node_id] = now
+        rx_b, tx_b, day = p["rx"], p["tx"], p["date"]
+        _pending.pop(node_id, None)
+    _write(node_id, rx_b, tx_b, day)
+
+
+def _write(node_id: int, rx_b: int, tx_b: int, day: str):
+    if rx_b <= 0 and tx_b <= 0:
+        return
+    try:
+        db.ex("INSERT INTO traffic_log(node_id, rx_bytes, tx_bytes, recorded_at) VALUES(?,?,?,?)",
+              node_id, rx_b, tx_b, db.now())
+        db.ex("INSERT INTO traffic_daily(node_id, date, rx_bytes, tx_bytes) VALUES(?,?,?,?) "
+              "ON CONFLICT(node_id, date) DO UPDATE SET "
+              "rx_bytes = rx_bytes + excluded.rx_bytes, "
+              "tx_bytes = tx_bytes + excluded.tx_bytes",
+              node_id, day, rx_b, tx_b)
+    except Exception:
+        pass
+
+
+def flush_all():
+    """退出/定时收尾：把内存里未到合并窗口的流量写库"""
+    with _pending_lock:
+        items = list(_pending.items())
+        _pending.clear()
+    for node_id, p in items:
+        _write(node_id, p["rx"], p["tx"], p["date"])
 
 
 def get_node_traffic(node_id: int, days: int = 30) -> dict:

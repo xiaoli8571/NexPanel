@@ -31,15 +31,14 @@ async def _ssh_loop(node: dict):
                 os_info = CACHE[nid]["host"]["os"] if CACHE[nid].get("host") else ""
                 db.ex("UPDATE nodes SET status=?, lxc_ok=?, os_info=? WHERE id=?",
                       ("online" if status == "online" else "nolxc", lxc_ok, os_info, nid))
-            # 记录流量
+            # 记录流量（与 Agent 通道同一套「速率×时长」累计口径；
+            # dt 由 traffic 模块按本节点两次采样的真实间隔算，别传采集命令耗时）
             try:
                 from . import traffic as traffic_mod
                 host = CACHE[nid].get("host")
                 if host:
-                    rx = host.get("rx_kbps", 0)
-                    tx = host.get("tx_kbps", 0)
-                    if rx > 0 or tx > 0:
-                        traffic_mod.record_traffic(nid, rx, tx)
+                    traffic_mod.accumulate_traffic(nid, host.get("rx_kbps", 0),
+                                                   host.get("tx_kbps", 0))
             except Exception:
                 pass
         except Exception as e:
@@ -147,6 +146,11 @@ async def shutdown():
         stop_node(tid)
     if _SWEEP:
         _SWEEP.cancel()
+    try:
+        from . import traffic as traffic_mod
+        traffic_mod.flush_all()      # 内存里最后一段流量累计落库，别随进程退出丢掉
+    except Exception:
+        pass
 
 
 # ────────────────── Agent 状态落库回扫 ──────────────────
@@ -239,6 +243,20 @@ def agent_online(node_id: int) -> bool:
     return agent_mod.is_online(node_id)
 
 
+_db_seen: dict[int, tuple] = {}          # node_id -> (上次落库的关键字段, 落库时间)
+
+
+def _db_sync(node_id: int, os_name: str, pub_ip: str, ts: float) -> bool:
+    """nodes 行的落库节流：字段没变且距上次 <30s 就不写（终端会话期间 poll 很密集，
+    每次一个 SQLite 提交会把事件循环钉住，表现为控制台卡顿）。返回是否写了。"""
+    last = _db_seen.get(node_id)
+    sig = (os_name, pub_ip)
+    if last and last[0] == sig and ts - last[1] < 30:
+        return False
+    _db_seen[node_id] = (sig, ts)
+    return True
+
+
 def agent_report(node_id: int, report: dict):
     """Agent 心跳/指标 → 写入统一缓存（与 SSH 采集同构）"""
     sysinfo = report.get("sys") or {}
@@ -267,18 +285,18 @@ def agent_report(node_id: int, report: dict):
                  "uptime_s": host.get("uptime_s", 0)},
     }
     CACHE[node_id] = entry
-    try:
-        db.ex("UPDATE nodes SET status='online', os_info=?, public_ip=COALESCE(NULLIF(?,''),public_ip), last_seen=? WHERE id=?",
-              (sysinfo.get("os", ""), sysinfo.get("public_ip", ""), db_now_str(), node_id))
-    except Exception:
-        pass
-    # 记录流量
+    os_name, pub_ip = entry["host"]["os"], sysinfo.get("public_ip", "")
+    now = time.time()
+    if _db_sync(node_id, os_name, pub_ip, now):
+        try:
+            db.ex("UPDATE nodes SET status='online', os_info=?, public_ip=COALESCE(NULLIF(?,''),public_ip), last_seen=? WHERE id=?",
+                  (os_name, pub_ip, db_now_str(), node_id))
+        except Exception:
+            pass
+    # 记录流量（内存累计 + 定时合并写库，避免每次心跳两次同步提交）
     try:
         from . import traffic as traffic_mod
-        rx = host.get("rx_kbps", 0)
-        tx = host.get("tx_kbps", 0)
-        if rx > 0 or tx > 0:
-            traffic_mod.record_traffic(node_id, rx, tx)
+        traffic_mod.accumulate_traffic(node_id, host.get("rx_kbps", 0), host.get("tx_kbps", 0))
     except Exception:
         pass
 

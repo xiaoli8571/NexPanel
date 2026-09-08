@@ -10,16 +10,103 @@ import time
 
 # Agent 脚本版本指纹：AGENT_PY 内嵌同名标记 + UPGRADE_SH 校验用，两处必须一致。
 # 升级校验依赖它判断下载到的新版 agent.py 确实比已装版本新（防拿到错误页/旧缓存）。
-AGENT_VER = "v20260829"
+AGENT_VER = "v20260908c"
+
+# 长轮询窗口：面板在没有待下发命令时最多 hold 住这么久（秒）。
+# 终端会话的按键/开控制台命令因此在「已挂起的那次请求」上即时返回，
+# 输入侧延迟从「最多一个轮询周期」降到「≈1 个 RTT」。须 < agent 侧 poll 超时(12s)。
+# 空闲窗口取 3s：配合 agent 侧 0.3s 的间隔，命令"没被挂起请求覆盖"的空窗只有 0.3s
+# （点开控制台要等的那一下就是原来 1.5s 空窗造成的），而总请求频率与旧版持平。
+POLL_HOLD = 2.0
+POLL_HOLD_IDLE = 3.0
 
 # ────────────────────────── 面板侧状态 ──────────────────────────
 _pending: dict[int, list] = {}       # node_id -> [cmd,...]
 _results: dict[str, dict] = {}       # cmd_id -> {"rc":..,"out":..} / event style
 _live: dict[int, float] = {}         # node_id -> last_seen ts (ws/http 均可)
+_token_nid: dict[str, int] = {}      # agent_token -> node_id（省掉每次 HTTP 的 SQLite 查询）
 
 # ── PTY 终端会话（浏览器 ⇄ 面板 ⇄ Agent 轮询流） ──
 _pty_subs: dict[str, asyncio.Queue] = {}   # sid -> 输出队列 (str chunk / "__CLOSED__")
 _pty_node: dict[str, int] = {}             # sid -> node_id (校验 pty_out 归属)
+_pty_recent: dict[int, float] = {}         # node_id -> 最近一次终端活动时间(开/输入/缩放/关闭)
+_cmd_waits: dict[int, tuple] = {}          # node_id -> (loop, asyncio.Event) 长轮询唤醒
+
+
+def _signal(node_id: int):
+    """命令入队后唤醒该节点正挂起的长轮询（可能来自工作线程，故走 call_soon_threadsafe）"""
+    ent = _cmd_waits.get(node_id)
+    if not ent:
+        return
+    loop, ev = ent
+    try:
+        if loop.is_closed():
+            return
+        loop.call_soon_threadsafe(ev.set)
+    except Exception:
+        pass
+
+
+def pty_active(node_id: int, grace: float = 15.0) -> bool:
+    """该节点是否有终端会话（含刚关闭 15s 内：让 pty_close 也能即时下发，别留一个挂死的 shell）"""
+    if any(nid == node_id for nid in _pty_node.values()):
+        return True
+    return (time.time() - _pty_recent.get(node_id, 0.0)) < grace
+
+
+async def poll_commands(node_id: int, hold: float) -> list:
+    """取待下发命令；为空时最多挂起 hold 秒，一有新命令立刻返回（长轮询）"""
+    cmds = pop_pending(node_id)
+    if cmds or hold <= 0:
+        return cmds
+    loop = asyncio.get_running_loop()
+    ev = asyncio.Event()
+    _cmd_waits[node_id] = (loop, ev)
+    try:
+        cmds = pop_pending(node_id)          # 注册后再查一次，避免注册竞态丢命令
+        if not cmds:
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=hold)
+            except Exception:                # 含 TimeoutError / 连接中断
+                pass
+            cmds = pop_pending(node_id)
+    finally:
+        if _cmd_waits.get(node_id) == (loop, ev):
+            _cmd_waits.pop(node_id, None)
+    return cmds
+
+
+def node_id_by_token(token: str) -> int | None:
+    """agent_token -> node_id 内存缓存：终端会话期间请求很密集，不必每次打 SQLite"""
+    return _token_nid.get(token)
+
+
+def remember_token(token: str, node_id: int):
+    if len(_token_nid) > 512:                # 防无界增长（token 轮换 / 节点删除后的残留）
+        _token_nid.clear()
+    _token_nid[token] = node_id
+
+
+def forget_token(node_id: int | None = None):
+    if node_id is None:
+        _token_nid.clear()
+        return
+    for k in [k for k, v in _token_nid.items() if v == node_id]:
+        _token_nid.pop(k, None)
+
+
+def forget_node(node_id: int):
+    """节点被删除时清掉它的全部面板侧残留。
+    尤其重要：token 缓存若不清，已删节点的 Agent 仍能拿旧 token 通过鉴权。"""
+    forget_token(node_id)
+    _pending.pop(node_id, None)
+    _live.pop(node_id, None)
+    _pty_recent.pop(node_id, None)
+    _cmd_waits.pop(node_id, None)
+    for sid in [s for s, n in _pty_node.items() if n == node_id]:
+        _pty_node.pop(sid, None)
+        _pty_subs.pop(sid, None)
+
 
 
 def open_pty(node_id: int, cmd: str, cols: int = 120, rows: int = 32) -> str:
@@ -27,9 +114,11 @@ def open_pty(node_id: int, cmd: str, cols: int = 120, rows: int = 32) -> str:
     sid = "p" + secrets.token_hex(8)
     _pty_subs[sid] = asyncio.Queue(maxsize=2000)
     _pty_node[sid] = node_id
+    _pty_recent[node_id] = time.time()
     _pending.setdefault(node_id, []).append(
         {"id": "o" + secrets.token_hex(6), "op": "pty_open", "sid": sid,
          "cmd": cmd, "cols": max(40, min(cols, 500)), "rows": max(8, min(rows, 300))})
+    _signal(node_id)
     return sid
 
 
@@ -39,6 +128,8 @@ def pty_input(sid: str, data: str):
         _pending.setdefault(nid, []).append(
             {"id": "i" + secrets.token_hex(6), "op": "pty_in", "sid": sid,
              "data": base64.b64encode(data.encode("utf-8", errors="replace")).decode()})
+        _pty_recent[nid] = time.time()
+        _signal(nid)
 
 
 def pty_resize(sid: str, cols: int, rows: int):
@@ -47,6 +138,8 @@ def pty_resize(sid: str, cols: int, rows: int):
         _pending.setdefault(nid, []).append(
             {"id": "w" + secrets.token_hex(6), "op": "pty_win", "sid": sid,
              "cols": max(40, min(cols, 500)), "rows": max(8, min(rows, 300))})
+        _pty_recent[nid] = time.time()
+        _signal(nid)
 
 
 def close_pty(sid: str):
@@ -56,6 +149,8 @@ def close_pty(sid: str):
     if nid is not None:
         _pending.setdefault(nid, []).append(
             {"id": "x" + secrets.token_hex(6), "op": "pty_close", "sid": sid})
+        _pty_recent[nid] = time.time()
+        _signal(nid)
 
 
 def pty_push(node_id: int, sid: str, seq: int, data_b64: str, closed: bool) -> bool:
@@ -87,6 +182,7 @@ def queue_exec(node_id: int, script: str, timeout: int = 120, b64: bool = True) 
         {"id": cid, "op": "exec", "b64": b64,
          "script": base64.b64encode(script.encode()).decode() if b64 else script,
          "timeout": timeout})
+    _signal(node_id)
     return cid
 
 
@@ -95,7 +191,7 @@ def wait_result(cmd_id: str, timeout: float = 300) -> dict | None:
     while time.time() < deadline:
         if cmd_id in _results:
             return _results.pop(cmd_id)
-        time.sleep(0.3)
+        time.sleep(0.05)
     _discard(_pending_scan(cmd_id))
     return None
 
@@ -149,26 +245,90 @@ def offline_nodes():
 # ══════════════ 目标机上运行的 Agent（单文件、零依赖） ══════════════
 AGENT_PY = r'''#!/usr/bin/env python3
 """NexPanel Agent — 反向接入面板，零依赖(HTTP 轮询)。安装即接管。"""
-import base64, json, os, platform, socket, subprocess, sys, threading, time
+# 注意：http.client 必须起别名！本文件下面有 def http(...) 会遮蔽同名模块，
+# 直接 `import http.client` 会让 http 变成函数 → 'function' object has no attribute 'client'
+import base64, json, os, platform, socket, ssl, subprocess, sys, threading, time
+import http.client as _http_client
 import urllib.request
+from urllib.parse import urlparse
 
 API, TOKEN = "", ""
-AGENT_VER = "v20260829"   # 版本指纹：面板 UPGRADE_SH 校验用，改代码时同步更新
+AGENT_VER = "v20260908c"   # 版本指纹：面板 UPGRADE_SH 校验用，改代码时同步更新
 CONF = "/opt/lxcdeck-agent/agent.conf"
 PREV = {"cpu_line": None, "rx": None, "tx": None, "ct_cpu": {}}
 _last_full = 0.0
 _cache_report = {}
+_TLS = threading.local()          # 每个线程一条常驻 HTTP(S) 连接（keep-alive）
+_URL = None
+_URL_LOCK = threading.Lock()
+
+# 慢指标（外网探测 / 容器枚举 / 公网 IP）由后台采样线程刷新，
+# 绝不能留在主轮询链路上：一次超时就可能把按键/开控制台命令拖住数秒。
+_LAT = {"ts": 0.0, "out": {}}
+_CTS = {"ts": 0.0, "out": {}}
+_PUBIP = {"ip": "", "ts": 0.0}
+_SLOW_LOCK = threading.Lock()
+
 
 def log(m): print(f"[agent] {time.strftime('%H:%M:%S')} {m}", flush=True)
 
+def _url():
+    global _URL
+    if _URL is None:
+        with _URL_LOCK:
+            if _URL is None:
+                _URL = urlparse(API)
+    return _URL
+
+def _drop():
+    c = getattr(_TLS, "c", None)
+    if c is not None:
+        _TLS.c = None
+        try: c.close()
+        except Exception: pass
+
+def _conn(timeout):
+    c = getattr(_TLS, "c", None)
+    if c is not None:
+        if getattr(c, "sock", None) is not None:
+            try: c.sock.settimeout(timeout)
+            except Exception: pass
+        return c
+    u = _url()
+    host = u.hostname
+    port = u.port or (443 if u.scheme == "https" else 80)
+    if u.scheme == "https":
+        c = _http_client.HTTPSConnection(host, port, timeout=timeout,
+                                         context=ssl.create_default_context())
+    else:
+        c = _http_client.HTTPConnection(host, port, timeout=timeout)
+    _TLS.c = c
+    return c
+
 def http(path, data=None, timeout=10):
-    req = urllib.request.Request(API.rstrip("/") + path,
-        data=json.dumps(data).encode() if data is not None else None,
-        headers={"Authorization": "Bearer " + TOKEN,
-                 "Content-Type": "application/json"},
-        method="POST" if data is not None else "GET")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+    """走常驻连接（keep-alive）：省掉每次请求的 TCP+TLS 握手（跨境 ≈2-3 个 RTT）。
+    连接被服务端回收/断开时自动重连一次，行为与旧的 urlopen 等价。"""
+    body = json.dumps(data).encode() if data is not None else None
+    method = "POST" if data is not None else "GET"
+    prefix = _url().path.rstrip("/")
+    hdrs = {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json",
+            "Accept": "application/json", "Connection": "keep-alive"}
+    last = None
+    for attempt in range(2):
+        c = _conn(timeout)
+        try:
+            c.request(method, prefix + path, body=body, headers=hdrs)
+            r = c.getresponse()
+            raw = r.read()                       # 必须读完，否则连接不可复用
+            if r.status >= 400:
+                raise RuntimeError(f"http {r.status}")
+            return json.loads(raw.decode() or "{}")
+        except Exception as e:
+            last = e
+            _drop()
+            if attempt == 0:
+                time.sleep(0.05)
+    raise last
 
 def run(script, timeout=120):
     p = subprocess.run(["bash", "-c", script], capture_output=True,
@@ -223,68 +383,118 @@ def host_metrics():
             "rx_kbps": rx_k, "tx_kbps": tx_k, "uptime_s": up}
 
 def containers():
+    """一次 bash 调用拿全部容器状态（原来每个容器 4 次 subprocess，容器一多轮询就被拖住）"""
     out = {}
     try:
-        rc, names = run("lxc-ls -1", 15)
+        script = r"""
+for n in $(lxc-ls -1 2>/dev/null); do
+  s=$(lxc-info -sH -n "$n" 2>/dev/null | tr -d ' \r')
+  p=$(lxc-info -pH -n "$n" 2>/dev/null | tr -d ' \r')
+  i=$(lxc-info -iH -n "$n" 2>/dev/null | tr -d ' \r' | head -1)
+  printf '%s|%s|%s|%s\n' "$n" "$s" "$p" "$i"
+done"""
+        rc, so = run(script, 20)
         if rc != 0: return out
-        prev = PREV["ct_cpu"]
-        newprev = {}
-        for n in names.split():
-            st = "stopped"
-            r2, so = run(f"lxc-info -sH -n {n} 2>/dev/null", 10)
-            if r2 == 0 and so.strip(): st = so.strip().lower()
-            pid = ""
-            r2, po = run(f"lxc-info -pH -n {n} 2>/dev/null", 10)
-            if r2 == 0: pid = po.strip()
-            up = 0; ip = ""
-            if pid:
-                r2, uo = run(f"ps -o etimes= -p {pid} 2>/dev/null", 10)
-                if uo.strip().isdigit(): up = int(uo.strip())
-                r2, io = run(f"lxc-info -iH -n {n} 2>/dev/null", 10)
-                ip = io.strip().splitlines()[0] if io.strip() else ""
+        prev = PREV["ct_cpu"]; newprev = {}
+        now = time.time()
+        dt = max(now - PREV.get("ct_t", now), 0.5)
+        for ln in so.splitlines():
+            parts = ln.split("|")
+            if len(parts) != 4: continue
+            n, st, pid, ip = parts
+            st = st.lower() or "stopped"
+            up = 0
+            if pid.isdigit():
+                try:
+                    with open(f"/proc/{pid}/stat") as f:
+                        fields = f.read().rsplit(") ", 1)[-1].split()
+                    btime = None
+                    for l2 in open("/proc/stat"):
+                        if l2.startswith("btime"): btime = int(l2.split()[1]); break
+                    clk = os.sysconf("SC_CLK_TCK") or 100
+                    stime_ticks = int(fields[19])
+                    now_u = time.time()
+                    boot_u = now_u - float(open("/proc/uptime").read().split()[0])
+                    up = max(int(now_u - (boot_u + stime_ticks / clk)), 0)
+                except Exception:
+                    pass
             mu = uu = 0
             d = f"/sys/fs/cgroup/lxc.payload.{n}"
             try: mu = int(open(d+"/memory.current").read())
             except Exception: pass
             try:
-                for ln in open(d+"/cpu.stat"):
-                    if ln.startswith("usage_usec"): uu = int(ln.split()[1]); break
+                for l3 in open(d+"/cpu.stat"):
+                    if l3.startswith("usage_usec"): uu = int(l3.split()[1]); break
             except Exception: pass
             cpu_pct = 0.0
-            if st == "running" and n in prev:
-                dt = PREV.get("ct_dt", 3)
-                cpu_pct = min((uu-prev[n])/1e6/dt*100, 400.0)
+            if st == "running" and n in prev and prev[n] <= uu:
+                cpu_pct = min((uu - prev[n]) / 1e6 / dt * 100, 400.0)
             newprev[n] = uu
-            out[n] = {"state": st, "uptime_s": up if st=="running" else 0,
-                      "mem_used_mb": round(mu/1048576,1) if st=="running" else 0,
-                      "cpu_pct": round(cpu_pct,1), "ip": ip}
+            out[n] = {"state": st, "uptime_s": up if st == "running" else 0,
+                      "mem_used_mb": round(mu/1048576, 1) if st == "running" else 0,
+                      "cpu_pct": round(cpu_pct, 1), "ip": ip}
         PREV["ct_cpu"] = newprev
-        PREV["ct_dt"] = 3.0
+        PREV["ct_t"] = now
     except Exception as e:
         log("containers err: "+str(e))
     return out
 
-def full_report():
-    global _last_full, _cache_report
-    now = time.time()
-    if now - _last_full > 30 or not _cache_report:
-        rc, o = run(". /etc/os-release 2>/dev/null; printf '%s|%s' \"${PRETTY_NAME:-Linux}\" \"$(uname -r)\"")
-        osname, _, kern = o.partition("|")
-        pub = ""
+def sysinfo():
+    """系统静态信息 + 公网 IP（外网请求可能超时，只允许在后台线程里跑）"""
+    rc, o = run(". /etc/os-release 2>/dev/null; printf '%s|%s' \"${PRETTY_NAME:-Linux}\" \"$(uname -r)\"")
+    osname, _, kern = o.partition("|")
+    pub = _PUBIP.get("ip", "")
+    if time.time() - _PUBIP.get("ts", 0.0) > 300:
+        _PUBIP["ts"] = time.time()
         try:
-            r = urllib.request.urlopen(urllib.Request if False else urllib.request.Request(
-                "https://api.ipify.org"), timeout=5)
-            pub = r.read().decode().strip()
+            req = urllib.request.Request("https://api.ipify.org")
+            with urllib.request.urlopen(req, timeout=5) as r:
+                pub = r.read().decode().strip()
+            _PUBIP["ip"] = pub
         except Exception:
             pass
-        _cache_report["sys"] = {"os": osname, "kernel": kern,
-                                "cores": os.cpu_count(),
-                                "hostname": socket.gethostname(),
-                                "public_ip": pub or ""}
-        _last_full = now
-    rep = {"type":"report","sys":_cache_report["sys"],
-           "host":host_metrics(),"cts":containers(),
-           "latency":latencies()}
+    return {"os": osname, "kernel": kern, "cores": os.cpu_count(),
+            "hostname": socket.gethostname(), "public_ip": pub or _PUBIP.get("ip", "")}
+
+
+def _slow_loop():
+    """慢指标（公网探测类）后台刷新：主轮询线程永远只读缓存，
+    这样外网被墙/超时也不会把终端命令的下发拖住几秒"""
+    global _last_full
+    while True:
+        try:
+            _cache_report["sys"] = sysinfo()
+            _last_full = time.time()
+        except Exception as e:
+            log("sysinfo err: %s" % e)
+        try:
+            out = {}
+            for name, h, p in (("Cloudflare", "1.1.1.1", 443), ("Google", "8.8.8.8", 53),
+                               ("AliDNS", "223.5.5.5", 53)):
+                try:
+                    t0 = time.time()
+                    c = socket.create_connection((h, p), timeout=2)
+                    c.close()
+                    out[name] = round((time.time() - t0) * 1000)
+                except Exception:
+                    out[name] = None
+            _LAT["out"] = out
+            _LAT["ts"] = time.time()
+        except Exception as e:
+            log("lat err: %s" % e)
+        time.sleep(30)
+
+
+def latencies():
+    """读后台缓存的 TCP 握手延迟(毫秒)；首轮未就绪时为空，主循环不等待"""
+    return _LAT["out"]
+
+
+def full_report():
+    rep = {"type": "report",
+           "sys": _cache_report.get("sys") or {"os": "", "kernel": "", "cores": os.cpu_count(),
+                                               "hostname": socket.gethostname(), "public_ip": ""},
+           "host": host_metrics(), "cts": containers(), "latency": latencies()}
     return rep
 
 _running: dict = {}
@@ -305,7 +515,8 @@ def _pty_open(cmd, sid, cols=120, rows=32):
                         struct.pack("HHHH", int(rows), int(cols), 0, 0))
         except Exception:
             pass
-        PTY[sid] = {"m": mfd, "p": p, "buf": bytearray(), "seq": 0, "eof": False}
+        PTY[sid] = {"m": mfd, "p": p, "buf": bytearray(), "seq": 0, "eof": False,
+                    "ev": threading.Event(), "lk": threading.Lock()}
         threading.Thread(target=_pty_read, args=(sid,), daemon=True).start()
         threading.Thread(target=_pty_flush, args=(sid,), daemon=True).start()
         log(f"pty open {sid}: {cmd[:60]}")
@@ -331,22 +542,34 @@ def _pty_read(sid):
             break
         if not data:
             break
-        s["buf"] += data
+        with s["lk"]:
+            s["buf"] += data
+        s["ev"].set()                # 事件驱动：一有输出就唤醒发送线程
     try:
         s["p"].wait(timeout=5)
     except Exception:
         pass
     s["eof"] = True
+    s["ev"].set()
 
 
 def _pty_flush(sid):
+    """事件驱动 + 8ms 合并窗口：单键回显几乎零等待，海量输出仍会聚成大块。
+    （原来是固定 sleep(0.12) 轮询，白白给每一次回显再加 120ms。）"""
     s = PTY.get(sid)
     if not s:
         return
     while sid in PTY:
-        time.sleep(0.12)
-        if s["buf"]:
-            data = bytes(s["buf"]); s["buf"].clear()
+        if not s["ev"].wait(1.0):
+            if s.get("eof"):
+                break
+            continue
+        s["ev"].clear()
+        time.sleep(0.008)                       # 合并窗口：同一次回显的残余字节
+        with s["lk"]:
+            data = bytes(s["buf"])
+            s["buf"].clear()
+        if data:
             payload = {"sid": sid, "seq": s["seq"],
                        "data": base64.b64encode(data).decode(), "closed": False}
             s["seq"] += 1
@@ -355,7 +578,7 @@ def _pty_flush(sid):
                 try:
                     http("/api/agent/pty_out", payload, timeout=15); ok = True; break
                 except Exception:
-                    time.sleep(1)
+                    time.sleep(0.5)
             if not ok:
                 log(f"pty out dropped {sid}#{payload['seq']}")
         if s.get("eof") and not s["buf"]:
@@ -373,6 +596,10 @@ def _pty_kill(sid):
     s = PTY.pop(sid, None)
     if not s:
         return
+    try:
+        s["ev"].set()                     # 唤醒可能阻塞在 wait() 上的发送线程，避免线程泄漏
+    except Exception:
+        pass
     try:
         os.killpg(os.getpgid(s["p"].pid), signal.SIGKILL)
     except Exception:
@@ -442,21 +669,6 @@ def _do_exec(cmd):
         _running.pop(cid, None)
 
 
-def latencies():
-    """TCP 握手延迟探测(毫秒)：常用公共节点"""
-    import socket as s
-    out = {}
-    for name, h, p in (("Cloudflare","1.1.1.1",443), ("Google","8.8.8.8",53),
-                       ("AliDNS","223.5.5.5",53)):
-        try:
-            t0 = time.time()
-            c = s.create_connection((h,p), timeout=3); c.close()
-            out[name] = round((time.time()-t0)*1000)
-        except Exception:
-            out[name] = None
-    return out
-
-
 def main():
     global API, TOKEN
     for i, a in enumerate(sys.argv):
@@ -484,9 +696,17 @@ def main():
         except Exception:
             continue
     log(f"started {AGENT_VER} (conf={saved}), panel={API}")
+    # 慢指标(公网IP/外网延迟探测)放后台线程刷，主轮询循环只读缓存：
+    # 否则一次被墙的外网探测就能把终端命令的下发拖住好几秒
+    try:
+        _cache_report["sys"] = sysinfo()
+    except Exception:
+        pass
+    threading.Thread(target=_slow_loop, daemon=True).start()
     fail = 0
     _last_rep: dict = {}
     while True:
+        hold = 0.0
         try:
             fast = bool(PTY)                       # 有终端会话时加速轮询(输入低延迟)
             if fast and _last_rep:
@@ -495,9 +715,14 @@ def main():
                 rep = full_report(); _last_rep = dict(rep)
             rep["pending"] = list(_running.keys())
             rep["pty"] = list(PTY.keys())
-            # 上报 + 取命令（一次往返）
+            # 上报 + 取命令（一次往返）。新版面板在没命令时会把该请求挂起 hold 秒，
+            # 于是按键/开控制台命令搭"已经挂着的这次请求"即时下发，不必等下一轮。
             data = http("/api/agent/poll", rep, timeout=12)
             fail = 0
+            try:
+                hold = float(data.get("hold") or 0)
+            except Exception:
+                hold = 0.0
             for cmd in (data.get("commands") or []):
                 cid = cmd.get("id"); op = cmd.get("op")
                 if op == "exec" and cid not in _running:
@@ -514,7 +739,12 @@ def main():
             if fail % 10 == 1: log(f"offline: {e}; retrying...")
             time.sleep(min(2+fail, 10))
             continue
-        time.sleep(0.18 if PTY else 3)
+        # 面板挂了这次请求(新版) → 只需极短间隔继续下一轮；
+        # 老版面板不 hold → 退回原来的 0.18s / 3s 节奏，避免打成洪水。
+        if hold > 0:
+            time.sleep(0.05 if PTY else 0.3)
+        else:
+            time.sleep(0.18 if PTY else 3)
 
 if __name__ == "__main__":
     main()
@@ -689,7 +919,9 @@ else
 fi
 [ -s .new ] || { echo "[ERR] 下载内容为空"; exit 1; }
 head -1 .new | grep -q python || { echo "[ERR] 内容校验失败(非脚本)"; rm -f .new; exit 1; }
-grep -q "started __AGENT_VER__" .new || { echo "[ERR] 新版指纹缺失(面板代码未更新?)"; rm -f .new; exit 1; }
+# 指纹：只认「本文件里确实定义了当前版本」。注意不能用 "started <版本>"——
+# 运行时那行是 f"started {AGENT_VER}"，源码里没有这个字面量，历史上导致升级校验恒失败。
+grep -qF 'AGENT_VER = "__AGENT_VER__"' .new || { echo "[ERR] 新版指纹缺失(面板代码未更新?)"; rm -f .new; exit 1; }
 mv -f .new agent.py
 date "+%Y-%m-%d %H:%M:%S" > version.txt
 

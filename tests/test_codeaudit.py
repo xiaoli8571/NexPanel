@@ -12,14 +12,17 @@ def chk(name, cond, extra=""):
 
 print("== 1. UPGRADE_SH 指纹常量化 ==")
 from app import agent as agent_mod
-chk("UPGRADE_SH 已注入当前版本指纹", "started v20260829" in agent_mod.UPGRADE_SH)
+chk("UPGRADE_SH 已注入当前版本指纹", f'AGENT_VER = "{agent_mod.AGENT_VER}"' in agent_mod.UPGRADE_SH)
 chk("UPGRADE_SH 无残留占位符", "__AGENT_VER__" not in agent_mod.UPGRADE_SH)
-chk("AGENT_PY 内嵌 AGENT_VER 定义", 'AGENT_VER = "v20260829"' in agent_mod.AGENT_PY)
-chk("AGENT_VER 模块常量", agent_mod.AGENT_VER == "v20260829")
-# 模拟升级校验：从面板"下载"的 agent.py 含指纹
+chk("AGENT_PY 内嵌 AGENT_VER 定义", f'AGENT_VER = "{agent_mod.AGENT_VER}"' in agent_mod.AGENT_PY)
+chk("AGENT_VER 与内嵌脚本指纹一致",
+    agent_mod.AGENT_VER == agent_mod.AGENT_PY.split('AGENT_VER = "')[1].split('"')[0])
+# 模拟升级校验：从面板"下载"的 agent.py 必须能通过 UPGRADE_SH 里那句 grep 的匹配条件
 served = agent_mod.AGENT_PY
-chk("下发的 agent.py 能通过 UPGRADE_SH 的 grep 校验",
-    f'grep -q "started {agent_mod.AGENT_VER}"' .replace('"started ', '"started ') and agent_mod.AGENT_VER in served)
+chk("下发的 agent.py 能通过 UPGRADE_SH 的指纹校验",
+    f'AGENT_VER = "{agent_mod.AGENT_VER}"' in served)
+chk("升级脚本用源码字面量 AGENT_VER 做指纹（不是运行时 f-string 的 started 文本）",
+    'grep -qF \'AGENT_VER = "' in agent_mod.UPGRADE_SH)
 
 print("== 2. db.ex 返回 lastrowid / 写提交 ==")
 from app import db
