@@ -338,7 +338,7 @@ BG
     DOM=""
     if [ "$SVC_UP" = "1" ]; then
       for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-        DOM=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOGF" 2>/dev/null | tail -n 1)
+        DOM=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOGF" 2>/dev/null | grep -v '^https://api\.' | tail -n 1)
         [ -n "$DOM" ] && break
         sleep 2
       done
