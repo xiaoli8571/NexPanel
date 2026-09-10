@@ -10,7 +10,7 @@ import time
 
 # Agent 脚本版本指纹：AGENT_PY 内嵌同名标记 + UPGRADE_SH 校验用，两处必须一致。
 # 升级校验依赖它判断下载到的新版 agent.py 确实比已装版本新（防拿到错误页/旧缓存）。
-AGENT_VER = "v20260908c"
+AGENT_VER = "v20260910a"
 
 # 长轮询窗口：面板在没有待下发命令时最多 hold 住这么久（秒）。
 # 终端会话的按键/开控制台命令因此在「已挂起的那次请求」上即时返回，
@@ -25,6 +25,11 @@ _pending: dict[int, list] = {}       # node_id -> [cmd,...]
 _results: dict[str, dict] = {}       # cmd_id -> {"rc":..,"out":..} / event style
 _live: dict[int, float] = {}         # node_id -> last_seen ts (ws/http 均可)
 _token_nid: dict[str, int] = {}      # agent_token -> node_id（省掉每次 HTTP 的 SQLite 查询）
+
+# ── 命令在途账本：下发后 12s 未被"运行中/结果"确认即重投（幂等 op；at-least-once） ──
+_sent: dict[int, dict] = {}          # node_id -> {cid: [cmd, 下发时刻, 重投次数, 已确认]}
+_RESEND_AFTER, _RESEND_MAX = 12.0, 3
+_RESEND_OPS = ("exec", "pty_open", "pty_close")   # pty_in/win 不重投（重投=重复按键）
 
 # ── PTY 终端会话（浏览器 ⇄ 面板 ⇄ Agent 轮询流） ──
 _pty_subs: dict[str, asyncio.Queue] = {}   # sid -> 输出队列 (str chunk / "__CLOSED__")
@@ -56,20 +61,20 @@ def pty_active(node_id: int, grace: float = 15.0) -> bool:
 
 async def poll_commands(node_id: int, hold: float) -> list:
     """取待下发命令；为空时最多挂起 hold 秒，一有新命令立刻返回（长轮询）"""
-    cmds = pop_pending(node_id)
+    cmds = _collect(node_id)
     if cmds or hold <= 0:
         return cmds
     loop = asyncio.get_running_loop()
     ev = asyncio.Event()
     _cmd_waits[node_id] = (loop, ev)
     try:
-        cmds = pop_pending(node_id)          # 注册后再查一次，避免注册竞态丢命令
+        cmds = _collect(node_id)             # 注册后再查一次，避免注册竞态丢命令
         if not cmds:
             try:
                 await asyncio.wait_for(ev.wait(), timeout=hold)
             except Exception:                # 含 TimeoutError / 连接中断
                 pass
-            cmds = pop_pending(node_id)
+            cmds = _collect(node_id)
     finally:
         if _cmd_waits.get(node_id) == (loop, ev):
             _cmd_waits.pop(node_id, None)
@@ -100,6 +105,7 @@ def forget_node(node_id: int):
     尤其重要：token 缓存若不清，已删节点的 Agent 仍能拿旧 token 通过鉴权。"""
     forget_token(node_id)
     _pending.pop(node_id, None)
+    _sent.pop(node_id, None)
     _live.pop(node_id, None)
     _pty_recent.pop(node_id, None)
     _cmd_waits.pop(node_id, None)
@@ -119,7 +125,7 @@ def open_pty(node_id: int, cmd: str, cols: int = 120, rows: int = 32) -> str:
         {"id": "o" + secrets.token_hex(6), "op": "pty_open", "sid": sid,
          "cmd": cmd, "cols": max(40, min(cols, 500)), "rows": max(8, min(rows, 300))})
     _signal(node_id)
-    return sid
+    return sid  # 重投安全：agent 端同 sid 已在 PTY 表则跳过
 
 
 def pty_input(sid: str, data: str):
@@ -193,6 +199,7 @@ def wait_result(cmd_id: str, timeout: float = 300) -> dict | None:
             return _results.pop(cmd_id)
         time.sleep(0.05)
     _discard(_pending_scan(cmd_id))
+    _sent_drop(cmd_id)
     return None
 
 
@@ -217,6 +224,45 @@ def pop_pending(node_id: int) -> list:
     return _pending.pop(node_id, [])
 
 
+def _collect(node_id: int) -> list:
+    """取命令 = 新队列 + 超时未确认的在途重投（agent 端按 cid/sid 去重，幂等安全）"""
+    cmds = _pending.pop(node_id, [])
+    sent = _sent.setdefault(node_id, {})
+    now = time.time()
+    for c in cmds:
+        sent[c["id"]] = [c, now, 0, False]
+    for cid, ent in list(sent.items()):
+        cmd, ts, tries, acked = ent
+        if now - ts > 3600:
+            sent.pop(cid, None)          # 清陈旧账目
+            continue
+        if acked or tries >= _RESEND_MAX or cmd.get("op") not in _RESEND_OPS:
+            continue
+        if now - ts > _RESEND_AFTER:
+            ent[1], ent[2] = now, tries + 1
+            cmds.append(cmd)
+    return cmds
+
+
+def _sent_drop(cmd_id: str):
+    for sent in _sent.values():
+        if sent.pop(cmd_id, None):
+            return
+
+
+def ack_running(node_id: int, running, ptys):
+    """Agent 上报「正在执行/会话已存在」= 已收到，停止重投"""
+    sent = _sent.get(node_id)
+    if not sent:
+        return
+    rs = set(map(str, running or ()))
+    ps = set(map(str, ptys or ()))
+    for cid, ent in sent.items():
+        cmd = ent[0]
+        if cid in rs or (cmd.get("op") == "pty_open" and str(cmd.get("sid")) in ps):
+            ent[3] = True
+
+
 def push_result(cmd_id: str, rc: int, out: str):
     # 自动安装 LXC / 升级等命令的结果没有 wait 方消费，按时间淘汰防止无限增长
     now = time.time()
@@ -226,6 +272,7 @@ def push_result(cmd_id: str, rc: int, out: str):
         if len(_results) >= 256:   # 突发洪峰：仍超限则按时间丢最老的
             for k in sorted(_results, key=lambda k: _results[k].get("ts", 0))[:len(_results) - 255]:
                 _results.pop(k, None)
+    _sent_drop(cmd_id)
     _results[cmd_id] = {"rc": rc, "out": out, "ts": now}
 
 
@@ -247,13 +294,13 @@ AGENT_PY = r'''#!/usr/bin/env python3
 """NexPanel Agent — 反向接入面板，零依赖(HTTP 轮询)。安装即接管。"""
 # 注意：http.client 必须起别名！本文件下面有 def http(...) 会遮蔽同名模块，
 # 直接 `import http.client` 会让 http 变成函数 → 'function' object has no attribute 'client'
-import base64, json, os, platform, socket, ssl, subprocess, sys, threading, time
+import base64, json, os, platform, signal, socket, ssl, subprocess, sys, threading, time
 import http.client as _http_client
 import urllib.request
 from urllib.parse import urlparse
 
 API, TOKEN = "", ""
-AGENT_VER = "v20260908c"   # 版本指纹：面板 UPGRADE_SH 校验用，改代码时同步更新
+AGENT_VER = "v20260910a"   # 版本指纹：面板 UPGRADE_SH 校验用，改代码时同步更新
 CONF = "/opt/lxcdeck-agent/agent.conf"
 PREV = {"cpu_line": None, "rx": None, "tx": None, "ct_cpu": {}}
 _last_full = 0.0
@@ -331,9 +378,27 @@ def http(path, data=None, timeout=10):
     raise last
 
 def run(script, timeout=120):
-    p = subprocess.run(["bash", "-c", script], capture_output=True,
-                       text=True, timeout=timeout)
-    return p.returncode, (p.stdout + p.stderr)[-200000:]
+    # start_new_session: 独立进程组，超时整组强杀；合并捕获，避免守护进程
+    # 继承管道写端导致 subprocess.run 超时后 communicate 永久阻塞（结果永不回传）
+    p = subprocess.Popen(["bash", "-c", script], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, errors="replace", start_new_session=True)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, (out or "")[-200000:]
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        try:
+            out, _ = p.communicate(timeout=15)
+        except Exception:
+            out = ""
+        return 124, (out or "")[-190000:] + "\n[agent] 执行超时，进程组已强杀"
 
 # ---------- 指标采集 ----------
 def host_metrics():
@@ -641,6 +706,54 @@ def _pty_handle(cmd):
         _pty_kill(sid)
 
 
+_RQ = "/opt/lxcdeck-agent/results.queue"
+_RQ_LOCK = threading.Lock()
+
+
+def _rq_write(lines):
+    try:
+        if lines:
+            open(_RQ + ".t", "w").write("".join(l + "\n" for l in lines[-200:]))
+            os.replace(_RQ + ".t", _RQ)
+        else:
+            os.remove(_RQ)
+    except Exception:
+        pass
+
+
+def _rq_add(rec):
+    with _RQ_LOCK:
+        try:
+            lines = []
+            try:
+                lines = open(_RQ).read().splitlines()
+            except Exception:
+                pass
+            lines.append(json.dumps(rec))
+            _rq_write(lines)
+        except Exception:
+            pass
+
+
+def _rq_take(n):
+    with _RQ_LOCK:
+        try:
+            lines = open(_RQ).read().splitlines()
+        except Exception:
+            return []
+        if not lines:
+            return []
+        take, rest = lines[:n], lines[n:]
+        _rq_write(rest)
+        out = []
+        for l in take:
+            try:
+                out.append(json.loads(l))
+            except Exception:
+                pass
+        return out
+
+
 def _do_exec(cmd):
     cid = cmd.get("id","?")
     script = cmd.get("script","")
@@ -652,19 +765,17 @@ def _do_exec(cmd):
         rc, out = 124, "timeout"
     except Exception as e:
         rc, out = 1, str(e)
+    payload = {"id": cid, "rc": rc, "out": base64.b64encode(out.encode()).decode()}
     try:
-        http("/api/agent/result",
-             {"id":cid,"rc":rc,"out":base64.b64encode(out.encode()).decode()},
-             timeout=20)
-        log(f"exec done {cid} rc={rc}")
-    except Exception as e:
-        log(f"result upload failed {cid}: {e}; will retry once")
-        time.sleep(2)
-        try:
-            http("/api/agent/result",
-                 {"id":cid,"rc":rc,"out":base64.b64encode(out.encode()).decode()}, timeout=20)
-        except Exception as e2:
-            log(f"result dropped {cid}: {e2}")
+        for i in range(2):
+            try:
+                http("/api/agent/result", payload, timeout=20)
+                log(f"exec done {cid} rc={rc}")
+                return
+            except Exception as e:
+                log(f"result upload failed {cid}: {e}")
+                time.sleep(2)
+        _rq_add(payload)   # 直传全失败 → 落盘，随后续 poll 兜底回传
     finally:
         _running.pop(cid, None)
 
@@ -715,9 +826,17 @@ def main():
                 rep = full_report(); _last_rep = dict(rep)
             rep["pending"] = list(_running.keys())
             rep["pty"] = list(PTY.keys())
+            rq = _rq_take(16)   # 直传失败积压的结果，随 poll 回传（面板 push_result 消费）
+            if rq:
+                rep["results"] = rq
             # 上报 + 取命令（一次往返）。新版面板在没命令时会把该请求挂起 hold 秒，
             # 于是按键/开控制台命令搭"已经挂着的这次请求"即时下发，不必等下一轮。
-            data = http("/api/agent/poll", rep, timeout=12)
+            try:
+                data = http("/api/agent/poll", rep, timeout=12)
+            except Exception:
+                for r in rq:
+                    _rq_add(r)
+                raise
             fail = 0
             try:
                 hold = float(data.get("hold") or 0)

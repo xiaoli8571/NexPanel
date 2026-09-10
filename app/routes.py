@@ -759,6 +759,7 @@ async def agent_poll(request: _Req):
     except Exception:
         report = {}
     agent_mod.touch(nid)
+    agent_mod.ack_running(nid, report.get("pending"), report.get("pty"))
     # 指标落库是同步 SQLite：放工作线程，别把事件循环堵住
     # （堵住的直接后果就是终端按键/回显在浏览器端卡成几秒）
     await asyncio.to_thread(_poll_side_effects, nid, report)
@@ -768,7 +769,13 @@ async def agent_poll(request: _Req):
 
 
 def _poll_side_effects(nid: int, report: dict):
-    """一次 poll 的副作用：指标入缓存 + 按需自动下发 LXC 安装（同步 DB 活，跑在线程里）"""
+    """一次 poll 的副作用：兜底结果入账 + 指标入缓存 + 按需自动下发 LXC 安装（同步 DB 活，跑在线程里）"""
+    for rr in (report.get("results") or []):
+        try:
+            agent_mod.push_result(str(rr["id"]), int(rr.get("rc", 0)),
+                                  base64_decode(str(rr.get("out", ""))))
+        except Exception:
+            pass
     monitor.agent_report(nid, report)
     # 如果接入时选择"作为母机"，且目标机未安装 LXC，自动下发一次安装命令（15分钟去重）
     node = db.one("SELECT * FROM nodes WHERE id=?", (nid,))
